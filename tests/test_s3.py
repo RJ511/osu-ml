@@ -87,3 +87,43 @@ def test_sync_directory_dry_run_never_touches_client(tmp_path):
 def test_sync_directory_missing_dir_returns_empty_stats(tmp_path):
     stats = sync_directory(FakeS3Client(), "bucket", tmp_path / "nao-existe", "data/raw")
     assert stats.uploaded == 0 and stats.skipped == 0 and not stats.failed
+
+
+def test_upload_pack_sends_one_encrypted_file_verifies_size_and_can_share_a_temporary_link(tmp_path):
+    from osuml.storage.s3 import upload_pack
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+            self.size = 0
+
+        def get_public_access_block(self, Bucket):
+            return {"PublicAccessBlockConfiguration": {"BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": True, "RestrictPublicBuckets": True}}
+
+        def upload_file(self, path, bucket, key, ExtraArgs=None):
+            self.calls.append(("upload", bucket, key, ExtraArgs))
+            self.size = len(open(path, "rb").read())
+
+        def head_object(self, Bucket, Key):
+            return {"ContentLength": self.size}
+
+        def generate_presigned_url(self, op, Params, ExpiresIn):
+            self.calls.append(("presign", Params["Key"], ExpiresIn))
+            return "https://exemplo/temporario"
+
+    z = tmp_path / "osuml-pack.zip"
+    z.write_bytes(b"12345")
+    dry = upload_pack(z, "b", "eu-west-1", dry_run=True)
+    assert dry["dry_run"] is True and dry["key"] == "recommend/osuml-pack.zip" and dry["bytes"] == 5
+    c = FakeClient()
+    out = upload_pack(z, "osu-ml-skill", "eu-west-1", share_hours=2, client=c)
+    assert c.calls[0] == ("upload", "osu-ml-skill", "recommend/osuml-pack.zip", {"ServerSideEncryption": "AES256"})
+    assert out["uploaded_bytes"] == 5 and out["public_access_blocked"] is True and out["temporary_url"].startswith("https://") and c.calls[1][2] == 7200
+    c2 = FakeClient()
+    c2.head_object = lambda Bucket, Key: {"ContentLength": 3}  # truncado: tem de falhar
+    import pytest
+
+    with pytest.raises(RuntimeError, match="difere"):
+        upload_pack(z, "b", "r", client=c2)
+    with pytest.raises(FileNotFoundError):
+        upload_pack(tmp_path / "nao-existe.zip", "b", "r")

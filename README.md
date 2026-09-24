@@ -16,6 +16,27 @@ A aplicação OAuth cria-se em <https://osu.ppy.sh/home/account/edit#new-oauth-a
 O Callback URL pode ficar vazio: o collector usa **Client Credentials** (scope `public`),
 que chega para ler dados públicos.
 
+## Recomendador de mapas (sem API, sem credenciais)
+
+Escreve o nome de um jogador **que já está no pacote de dados**, escolhe a(s) skill(s) que queres melhorar (Aim, Speed, Stamina, Reading)
+e recebe mapas que te desafiem nelas, que a princípio consigas fazer (≥ 88 % de accuracy) e do estilo de jogadores parecidos. Cada sugestão
+tem "Serve / Não serve"; o feedback fica num ficheiro de texto.
+
+```bash
+pip install -e ".[recommend]"
+# descompactar o pacote de dados (osuml-pack.zip, à parte: ver abaixo) na pasta do projeto -> ./pack
+python -m osuml recommend serve --open                              # aplicação em http://127.0.0.1:8770
+python -m osuml recommend suggest --player "PXD Vieira" --skills speed,aim -n 20
+python -m osuml recommend feedback --player "PXD Vieira" --beatmap 2196749 --verdict serve --skills speed --note "boa"
+```
+
+- **Feedback**: `pack/feedback/recomendacoes_feedback.txt` (TSV com cabeçalho: data, jogador, mapa, veredicto, tipo, skills, score, nota, link).
+  Abre-se em qualquer editor ou folha de cálculo; guarda-se também na tabela `recommendation_feedback` do `players.db`.
+- **Pacote de dados** (`osuml recommend pack --players "PXD Vieira" gaaGOD --out dist/osuml-pack.zip`): índice, modelos e só os jogadores indicados.
+  **Não vai neste repositório nem numa release pública**: deriva dos dumps do data.ppy.sh, cuja licença só permite análise estatística e não
+  exposição pública sem autorização do ppy (contact@ppy.sh). Distribuir à parte, em privado.
+- O recomendador estima, não garante: prevê a accuracy provável a partir do perfil do jogador, sem mods, forma do dia nem ritmo de evolução.
+
 ## Utilização
 
 ```bash
