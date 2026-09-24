@@ -33,6 +33,10 @@ class ApiError(Exception):
         self.body = body
 
 
+class Cancelled(Exception):
+    """Cancelamento pedido pelo utilizador (painel): nenhum pedido novo é enviado."""
+
+
 @dataclass
 class HttpResult:
     method: str
@@ -81,6 +85,11 @@ class HttpClient:
         self._sleep = sleep
         self._auth_header = auth_header
         self.stats = HttpStats()
+        # Ligados pelo painel (`osuml panel`): `cancel_check()` é consultado antes de CADA pedido
+        # (e de novo depois da espera do limitador); `observer(evento)` recebe todos os pedidos
+        # enviados, incluindo o de token OAuth, com o instante real de início.
+        self.cancel_check: Callable[[], bool] | None = None
+        self.observer: Callable[[dict[str, Any]], None] | None = None
         headers = {"Accept": "application/json", "User-Agent": user_agent}
         if extra_headers:
             headers.update(extra_headers)
@@ -90,6 +99,15 @@ class HttpClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancel_check is not None and self.cancel_check():
+            raise Cancelled("cancelado antes de enviar o pedido")
+
+    def _emit(self, method: str, path: str, start_wall: float, duration_ms: int, status: int | None) -> None:
+        if self.observer is not None:
+            self.observer({"client": self.name, "method": method, "path": path,
+                           "start": start_wall, "duration_ms": duration_ms, "status": status})
 
     def _backoff(self, attempt: int, retry_after: str | None) -> float:
         if retry_after:
@@ -114,11 +132,17 @@ class HttpClient:
         params = dict(params or {})
         attempt = 0
         while True:
-            self.limiter.wait()
+            self._raise_if_cancelled()
             headers: dict[str, str] = {}
             if authenticated and self._auth_header is not None:
+                # Pode disparar o pedido de token (que passa pelo limitador): tem de acontecer
+                # ANTES de esperar pelo intervalo deste pedido, senão a chamada à API sai
+                # colada ao pedido de token e viola o intervalo mínimo.
                 headers.update(self._auth_header())
+            self.limiter.wait()
+            self._raise_if_cancelled()  # o cancelamento pode ter chegado durante a espera do limitador
             started = time.monotonic()
+            started_wall = time.time()
             self.stats.requests += 1
             try:
                 resp = self._client.request(
@@ -126,6 +150,7 @@ class HttpClient:
                 )
             except httpx.TransportError as exc:
                 duration = int((time.monotonic() - started) * 1000)
+                self._emit(method, path, started_wall, duration, None)
                 if attempt >= self.max_retries:
                     self.stats.errors += 1
                     raise ApiError(f"{self.name}: erro de rede persistente em {path}: {exc}") from exc
@@ -140,6 +165,7 @@ class HttpClient:
                 continue
 
             duration = int((time.monotonic() - started) * 1000)
+            self._emit(method, path, started_wall, duration, resp.status_code)
             # Log sem headers nem corpo: nunca expõe o token.
             log.info("%s %s %s %s -> %d (%dms)", self.name, method, path, params or "", resp.status_code, duration)
 

@@ -130,6 +130,11 @@ class Store:
             ).mappings().first()
             return dict(row) if row else None
 
+    def find_user_by_id(self, user_id: int) -> dict[str, Any] | None:
+        with self.engine.connect() as c:
+            row = c.execute(select(m.users).where(m.users.c.user_id == user_id)).mappings().first()
+            return dict(row) if row else None
+
     # ---------------------------------------------------------------- scores
     def ingest_scores(self, objs: Iterable[dict[str, Any]], source: str, request_id: int) -> IngestStats:
         stats = IngestStats()

@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from ..storage import models as m
 from ..storage.database import Store
+from .derived import SESSION_GAP, add_derived
 
 COLUMNS = [
     "score_id", "user_id", "beatmap_id", "ruleset_id", "legacy_score_id", "passed", "accuracy",
@@ -37,7 +38,8 @@ def _git_commit() -> str | None:
 def _rows(store: Store, user_id: int) -> list[dict[str, Any]]:
     s, b = m.scores, m.beatmaps
     q = (
-        select(*[s.c[c] for c in COLUMNS], b.c.beatmapset_id, b.c.difficulty_rating.label("nomod_star_rating"))
+        select(*[s.c[c] for c in COLUMNS], b.c.beatmapset_id, b.c.difficulty_rating.label("nomod_star_rating"),
+               b.c.status.label("beatmap_status"))
         .select_from(s.outerjoin(b, b.c.beatmap_id == s.c.beatmap_id))
         .where(s.c.user_id == user_id)
         .order_by(s.c.ended_at, s.c.score_id)
@@ -51,7 +53,7 @@ def _rows(store: Store, user_id: int) -> list[dict[str, Any]]:
             for k in ("started_at", "ended_at"):
                 row[k] = row[k].isoformat() if row[k] else None
             out.append(row)
-    return out
+    return add_derived(out)
 
 
 def export_user(store: Store, user_id: int, out_dir: Path, version: str) -> dict[str, Any]:
@@ -82,8 +84,12 @@ def export_user(store: Store, user_id: int, out_dir: Path, version: str) -> dict
         "created_at": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
         "report": store.user_report(user_id),
+        "session_gap_minutes": int(SESSION_GAP.total_seconds() // 60),
         "notes": "Uma linha por score único (dedup por score_id). ended_at em UTC. "
-                 "nomod_star_rating é o SR sem mods embutido na resposta da API (NULL se ainda não houver metadata).",
+                 "nomod_star_rating é o SR sem mods embutido na resposta da API (NULL se ainda não houver metadata). "
+                 "pp é NULL em fails e em mapas sem pp (ex.: beatmap_status = loved). "
+                 "Colunas derivadas: is_legacy, mods_effective (sem CL), progress (fração do mapa avaliada), "
+                 "session_id e attempt_index (fazer o split por sessão, não por score).",
     }
     (target / f"manifest_{user_id}.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return manifest

@@ -111,3 +111,40 @@ score (recálculo de pp) e ausência de segredos nos logs.
   beatmaps em falta é a fase seguinte.
 - `nomod_star_rating` no export é o SR **sem mods**; SR com mods virá do
   endpoint de atributos ou de cálculo local a partir dos `.osu`.
+
+## Fase seguinte: ficheiros de beatmap (.osu)
+
+Não é preciso ter o osu! instalado. Cada ficheiro é identificado pelo MD5, que
+tem de coincidir com o `checksum` que a API devolveu para esse mapa.
+
+1. **Dump oficial (recomendado, 0 pedidos à API).** Em <https://data.ppy.sh>
+   descarrega o arquivo mais recente com os ficheiros `.osu` (ranked/loved) e
+   corre:
+
+   ```bash
+   python -m osuml maps import --path caminho/para/*_osu_files.tar.bz2 --user "PXD Vieira"
+   ```
+
+   O arquivo é lido em streaming e só os mapas que jogaste são guardados em
+   `data/raw/osu_files/{md5}.osu`. Também aceita uma pasta (ex.: cópia da pasta
+   Songs de outra máquina) ou `.zip`/`.osz`.
+
+2. **Fallback opcional** para mapas fora do dump (unranked/graveyard):
+
+   ```bash
+   python -m osuml maps status --user "PXD Vieira"     # vê missing_by_status
+   python -m osuml maps fetch  --user "PXD Vieira"     # 1 pedido por mapa, 1,1 s entre pedidos
+   ```
+
+   Usa `https://osu.ppy.sh/osu/{id}`, uma rota do site que **não** faz parte da
+   osu!API v2 documentada. Usa-a só para os poucos mapas em falta.
+
+3. **Parsing e export:**
+
+   ```bash
+   python -m osuml maps export --user "PXD Vieira" --version v0.2
+   ```
+
+   Gera `beatmaps_<id>.parquet` (1 linha por mapa: AR/OD/CS/HP, contagens,
+   duração) e `hitobjects_<id>.parquet` (1 linha por objeto: tempo, x, y, tipo,
+   dados de slider, fim do slider, beatLength e SV ativos).

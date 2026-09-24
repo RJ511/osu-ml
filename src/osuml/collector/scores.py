@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from ..api.http import ApiError, HttpResult
+from ..api.http import ApiError, Cancelled, HttpResult
 from ..api.osu import PAGE_LIMIT, RECENT_MAX_RESULTS, OsuClient
 from ..storage.database import IngestStats, Store, utcnow
 from ..storage.normalize import parse_dt
@@ -30,6 +30,11 @@ from ..storage.normalize import parse_dt
 log = logging.getLogger(__name__)
 
 SNAPSHOT_TYPES = ("best", "firsts", "pinned")
+# Teto EMPÍRICO de `best`: em 3 de 3 jogadores (incl. os rank 1 e 2, com milhares de plays) a API deu
+# offset 0 → 100 itens, offset 100 → 100, offset 200 → 0. O osu-web permite paginar `best` sem teto no
+# controlador, por isso o limite vem dos dados que a API expõe, não do código lido. Sem isto, cada
+# jogador gastava 1 pedido (1 em cada 5) só para receber uma página vazia.
+SNAPSHOT_MAX_ITEMS = {"best": 200}
 MAX_SNAPSHOT_PAGES = 50  # salvaguarda contra ciclos infinitos
 RECENT_WINDOW = timedelta(hours=24)
 
@@ -88,8 +93,9 @@ class ScoreCollector:
         return f"user:{user_id}:{mode}:{name}"
 
     # --------------------------------------------------------------- user
-    def resolve_user(self, username: str) -> dict[str, Any]:
-        cached = self.store.find_user(username)
+    def resolve_user(self, username: str | int) -> dict[str, Any]:
+        cached = (self.store.find_user_by_id(username) if isinstance(username, int)
+                  else self.store.find_user(username))
         if cached and self.now() - cached["fetched_at"] < self.user_ttl:
             log.info("Utilizador %s em cache (id=%s); sem pedido à API", username, cached["user_id"])
             return {"user_id": cached["user_id"], "username": cached["username"],
@@ -122,6 +128,8 @@ class ScoreCollector:
             if len(page) < PAGE_LIMIT:
                 break
             offset += PAGE_LIMIT
+            if offset >= SNAPSHOT_MAX_ITEMS.get(score_type, float("inf")):
+                break
         self.store.set_state(key, {"last_run_at": self.now().isoformat(), "last_count": res.stats.received})
         return res
 
@@ -162,8 +170,10 @@ class ScoreCollector:
         return res
 
     # ---------------------------------------------------------------- run
-    def collect(self, username: str, *, mode: str | None = None, force_snapshot: bool = False) -> dict[str, Any]:
-        self.run_id = self.store.start_run("collect", username)
+    def collect(self, username: str | int, *, mode: str | None = None, force_snapshot: bool = False,
+                snapshot_types: tuple[str, ...] = SNAPSHOT_TYPES) -> dict[str, Any]:
+        username = username if isinstance(username, int) else str(username)
+        self.run_id = self.store.start_run("collect", str(username))
         summary: dict[str, Any] = {"run_id": self.run_id, "username": username, "sources": {}, "errors": []}
         status = "ok"
         try:
@@ -173,7 +183,7 @@ class ScoreCollector:
             summary.update(user_id=user_id, mode=mode, user_from_cache=user["from_cache"])
 
             steps: list[tuple[str, Callable[[], SourceResult]]] = [
-                *[(t, lambda t=t: self.collect_snapshot(user_id, mode, t, force_snapshot)) for t in SNAPSHOT_TYPES],
+                *[(t, lambda t=t: self.collect_snapshot(user_id, mode, t, force_snapshot)) for t in snapshot_types],
                 ("recent", lambda: self.collect_recent(user_id, mode)),
             ]
             for name, step in steps:
@@ -188,6 +198,10 @@ class ScoreCollector:
                 summary["sources"][name] = r.as_dict()
 
             summary["dataset"] = self.store.user_report(user_id)
+        except Cancelled:
+            status = "cancelled"
+            summary["errors"].append({"source": "run", "error": "cancelado pelo utilizador"})
+            raise
         except Exception as exc:
             status = "failed"
             summary["errors"].append({"source": "run", "error": f"{type(exc).__name__}: {exc}"})

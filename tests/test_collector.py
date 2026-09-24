@@ -277,3 +277,51 @@ def test_export_parquet(env):
     manifest = export_user(store, USER_ID, tmp / "processed", "v0.1")
     assert manifest["rows"] == 152
     assert (tmp / "processed" / "v0.1" / manifest["file"]).exists()
+
+
+def test_derived_columns():
+    from osuml.dataset.derived import add_derived
+
+    stats_fail = json.dumps({"great": 90, "ok": 5, "miss": 5, "slider_tail_hit": 40})
+    maxs = json.dumps({"great": 400, "slider_tail_hit": 120, "large_tick_hit": 2})
+    rows = [
+        {"ended_at": "2026-09-22T19:00:00", "beatmap_id": 1, "passed": False, "legacy_score_id": None,
+         "mod_acronyms": "", "statistics": stats_fail, "maximum_statistics": maxs},
+        {"ended_at": "2026-09-22T19:05:00", "beatmap_id": 1, "passed": True, "legacy_score_id": None,
+         "mod_acronyms": "DT,HD", "statistics": maxs, "maximum_statistics": maxs},
+        {"ended_at": "2026-09-22T19:10:00", "beatmap_id": 2, "passed": True, "legacy_score_id": 55,
+         "mod_acronyms": "CL,DT", "statistics": "{}", "maximum_statistics": "{}"},
+        {"ended_at": "2026-09-22T21:00:00", "beatmap_id": 1, "passed": False, "legacy_score_id": None,
+         "mod_acronyms": "", "statistics": stats_fail, "maximum_statistics": maxs},
+    ]
+    out = add_derived(rows)
+    assert out[0]["progress"] == 0.25 and out[1]["progress"] == 1.0
+    assert [r["session_id"] for r in out] == [1, 1, 1, 2]
+    assert [r["attempt_index"] for r in out] == [1, 2, 1, 1]
+    assert out[2]["is_legacy"] and not out[0]["is_legacy"]
+    assert out[2]["mods_effective"] == "DT" and out[1]["mods_effective"] == "DT,HD"
+
+
+def test_export_has_derived_columns(env):
+    import pyarrow.parquet as pq
+    from osuml.dataset.export import export_user
+
+    fake, make, _, _, tmp = env
+    collector, store = make()
+    collector.collect("PXD Vieira")
+    manifest = export_user(store, USER_ID, tmp / "processed", "v0.2")
+    cols = pq.read_table(tmp / "processed" / "v0.2" / manifest["file"]).column_names
+    for c in ("is_legacy", "mods_effective", "progress", "session_id", "attempt_index", "beatmap_status"):
+        assert c in cols
+
+
+def test_best_snapshot_stops_at_the_200_item_ceiling(env):
+    """Com 300 scores disponíveis, `best` faz só 2 pedidos (offset 0 e 100): o 3.º seria sempre vazio."""
+    fake, make, *_ = env
+    fake.best = [score(i, fake.now - timedelta(days=500 - i), beatmap=2000 + i) for i in range(1, 301)]
+    fake.pinned, fake.recent = [], []
+    collector, store = make()
+    summary = collector.collect("PXD Vieira", snapshot_types=("best",))
+    best_calls = [c for c in fake.calls if c[1].endswith("/scores/best")]
+    assert [int(c[2]["offset"]) for c in best_calls] == [0, 100]
+    assert summary["sources"]["best"]["requests"] == 2

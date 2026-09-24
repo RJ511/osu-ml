@@ -176,3 +176,81 @@ coverage_gaps = Table(
     Column("detected_at", DateTime, nullable=False),
     Column("run_id", String(36), ForeignKey("runs.run_id")),
 )
+
+beatmap_files = Table(
+    "beatmap_files",
+    metadata,
+    # Ficheiro .osu guardado em data/raw/osu_files/{md5}.osu (content-addressed).
+    Column("beatmap_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("md5", String(32), nullable=False),
+    Column("rel_path", String(512), nullable=False),
+    Column("bytes", Integer, nullable=False),
+    Column("source", String(32), nullable=False),  # dump | folder | osu_web
+    Column("origin", String(1024)),  # ficheiro/arquivo de onde veio
+    # True se o MD5 coincide com beatmaps.checksum (a versão do mapa que a API conhece).
+    Column("checksum_match", Boolean),
+    Column("imported_at", DateTime, nullable=False),
+)
+Index("ix_beatmap_files_md5", beatmap_files.c.md5)
+
+panel_jobs = Table(
+    "panel_jobs",
+    metadata,
+    # Fila de recolhas multi-jogador controlada pelo painel (`osuml panel`).
+    Column("user_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("label", String(128), nullable=False),
+    Column("band", String(32)),
+    Column("status", String(16), nullable=False),  # queued | running | done | cancelled | failed
+    Column("requests", Integer, nullable=False, default=0),
+    Column("scores_total", Integer),  # scores únicos do jogador na BD após o job
+    Column("error", String(512)),
+    Column("started_at", DateTime),
+    Column("finished_at", DateTime),
+)
+
+tracked_players = Table(
+    "tracked_players",
+    metadata,
+    # Jogadores acompanhados continuamente por `osuml poll` (recolha irregular, < 24 h por jogador).
+    Column("user_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("band", String(32)),
+    Column("label", String(128)),
+    Column("status", String(16), nullable=False),  # active | inactive
+    Column("tracked_since", DateTime, nullable=False),
+    Column("last_poll_at", DateTime),
+    Column("next_poll_at", DateTime),  # NULL quando inativo
+    Column("last_activity_at", DateTime),  # máx. ended_at dos scores guardados
+    Column("replaces", BigInteger),
+    Column("replaced_by", BigInteger),
+    Column("note", String(256)),
+)
+
+map_categories = Table(
+    "map_categories",
+    metadata,
+    # Categorização de cada (mapa, combinação de mods jogada) — feita UMA vez e reutilizada por todos
+    # os jogadores (`osuml categorize`). `scheme` = versão da pool de referência + do esquema.
+    Column("beatmap_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("mods", String(64), primary_key=True, default=""),  # mods_effective (sem CL); "" = nomod
+    Column("status", String(16), nullable=False),  # ok | no_file | error
+    Column("scheme", String(32), nullable=False),
+    Column("raw", JSONType),  # stars, aim, speed, density, reading_visual, tech_entropy, ar, cs, od, hp, n_objects
+    Column("scores", JSONType),  # <eixo>_score / <eixo>_grade
+    Column("error", String(256)),
+    Column("computed_at", DateTime, nullable=False),
+)
+
+player_profiles = Table(
+    "player_profiles",
+    metadata,
+    Column("user_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("username", String(64)),
+    Column("pp", Float),
+    Column("global_rank", Integer),
+    Column("scheme", String(32), nullable=False),
+    Column("n_scores", Integer, nullable=False),
+    Column("n_evidence", Integer, nullable=False),  # plays passadas com accuracy >= limiar
+    Column("n_missing", Integer, nullable=False),  # plays em mapas sem categoria (sem .osu/erro)
+    Column("ratings", JSONType),  # <eixo>_rating (P90), <eixo>_typical (mediana), <eixo>_grade
+    Column("computed_at", DateTime, nullable=False),
+)

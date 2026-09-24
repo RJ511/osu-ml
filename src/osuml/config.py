@@ -39,6 +39,11 @@ class Settings:
     # objeto Score "novo" (ids unificados stable/lazer, statistics lazer).
     api_version: str = "20240529"
 
+    # Espelho opcional em S3 (osuml sync-s3). Credenciais nunca aqui: o boto3
+    # resolve-as sozinho do ambiente (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_PROFILE).
+    s3_bucket: str = "osu-ml-skill"
+    s3_region: str = "eu-west-1"
+
     @property
     def raw_dir(self) -> Path:
         return self.data_dir / "raw"
@@ -66,4 +71,6 @@ class Settings:
             min_interval_osu=_float("OSUML_MIN_INTERVAL_OSU", 1.1),
             snapshot_ttl_hours=_int("OSUML_SNAPSHOT_TTL_HOURS", 168),
             user_ttl_hours=_int("OSUML_USER_TTL_HOURS", 24),
+            s3_bucket=os.getenv("OSUML_S3_BUCKET", "osu-ml-skill"),
+            s3_region=os.getenv("OSUML_S3_REGION", "eu-west-1"),
         )
