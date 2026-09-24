@@ -94,3 +94,38 @@ def sync_all(raw_dir: Path, processed_dir: Path, dump_path: Path | None, bucket:
         _upload_one(client, bucket, f"dumps/{dump_path.name}", dump_path, dump_stats, dry_run)
     out["dump"] = vars(dump_stats)
     return out
+
+
+def upload_pack(zip_path: Path, bucket: str, region: str, key: str | None = None, *, share_hours: float = 0,
+                dry_run: bool = False, client=None) -> dict:
+    """Envia UM ficheiro (o pacote de dados do recomendador) para o bucket privado, cifrado no servidor (AES256), e confirma o tamanho.
+
+    Só corre quando pedido (`osuml recommend upload`). Credenciais: as do boto3 (ambiente/perfil), nunca lidas nem guardadas aqui.
+    `share_hours > 0` devolve também um link temporário de descarga (URL pré-assinado); esse link dá acesso ao ficheiro a quem o tiver."""
+    zip_path = Path(zip_path)
+    if not zip_path.is_file():
+        raise FileNotFoundError(f"não existe: {zip_path}")
+    key = key or f"recommend/{zip_path.name}"
+    out: dict = {"bucket": bucket, "region": region, "key": key, "bytes": zip_path.stat().st_size, "dry_run": dry_run}
+    if dry_run:
+        return out
+    if client is None:
+        import boto3
+
+        if boto3.session.Session().get_credentials() is None:
+            raise RuntimeError("sem credenciais AWS: configura AWS_PROFILE (aws configure) ou AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY no ambiente")
+        client = boto3.client("s3", region_name=region)
+    try:  # o bucket bloqueia acesso público? (precisa de s3:GetBucketPublicAccessBlock; se não houver permissão, fica "não verificado")
+        cfg = client.get_public_access_block(Bucket=bucket)["PublicAccessBlockConfiguration"]
+        out["public_access_blocked"] = all(cfg.get(k) for k in ("BlockPublicAcls", "IgnorePublicAcls", "BlockPublicPolicy", "RestrictPublicBuckets"))
+    except Exception:
+        out["public_access_blocked"] = None
+    client.upload_file(str(zip_path), bucket, key, ExtraArgs={"ServerSideEncryption": "AES256"})
+    head = client.head_object(Bucket=bucket, Key=key)
+    out["uploaded_bytes"] = int(head["ContentLength"])
+    if out["uploaded_bytes"] != out["bytes"]:
+        raise RuntimeError(f"tamanho no S3 ({out['uploaded_bytes']}) difere do local ({out['bytes']})")
+    if share_hours > 0:
+        out["temporary_url"] = client.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=int(share_hours * 3600))
+        out["temporary_url_hours"] = share_hours
+    return out

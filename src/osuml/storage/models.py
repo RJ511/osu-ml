@@ -254,3 +254,17 @@ player_profiles = Table(
     Column("ratings", JSONType),  # <eixo>_rating (P90), <eixo>_typical (mediana), <eixo>_grade
     Column("computed_at", DateTime, nullable=False),
 )
+
+
+recommendation_feedback = Table(
+    "recommendation_feedback",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", BigInteger, nullable=False),
+    Column("beatmap_id", BigInteger, nullable=False),
+    Column("verdict", String(16), nullable=False),  # serve | nao_serve
+    Column("kind", String(24)),  # novo | rejogar | tentar_de_novo
+    Column("skills", String(64)),  # "speed,aim"
+    Column("score", Float),
+    Column("created_at", DateTime, nullable=False),
+)

@@ -107,7 +107,7 @@ async function show(m,id){
 function renderPlayer(r){
  const p=r.player,out=[],h=el("div");h.appendChild(el("p","big",p.username));
  h.appendChild(el("div","sub",`#${p.user_id}${p.country?" · "+p.country:""} · ${p.pp!=null?n0(p.pp)+"pp":"pp ?"} · rank ${p.global_rank!=null?"#"+n0(p.global_rank):"?"} · ${p.n_scores} plays · evidência ${p.n_evidence??"?"} (passadas, acc ≥ 90%)${p.n_missing?" · "+p.n_missing+" sem categoria":""}${p.confident?"":" · rating pouco fiável (<10 plays de evidência)"}`));
- out.push(h);out.push(checkCard(p.user_id,r.check));
+ out.push(h);out.push(checkCard(p.user_id,r.check));out.push(recCard(p.user_id));
  const ax=el("div","axes");const rt=p.ratings||{};
  AX.forEach(([k,l,c])=>{const d=el("div","ax");d.style.setProperty("--c","var("+c+")");d.appendChild(el("div","lbl",l+" · rating P90"));
   const sc=rt[k+"_rating"];const b=el("b","",sc!=null?rt[k+"_grade"]+" "+n1(sc):"–");d.appendChild(b);
@@ -147,6 +147,41 @@ function checkCard(uid,c){
   paint();show("p",uid)};
  row.append(btn,msg);box.append(l1,l2,l3,row);return box}
 
+
+const AXL=[["aim","Aim"],["speed","Speed"],["stamina","Stamina"],["reading","Reading"]];
+const KIND={novo:"novo",rejogar:"rejogar",tentar_de_novo:"tentar de novo"};
+function recCard(uid){
+ const box=el("div","card2"),head=el("div");head.appendChild(el("b","","Recomendar mapas"));
+ box.appendChild(head);box.appendChild(el("div","sub","Escolhe a(s) skill(s) que queres melhorar. O resto é automático: mapas alcançáveis (≥ 88 % de accuracy) que te desafiem nessas skills, do estilo de jogadores parecidos; mapas já jogados voltam se a accuracy/pp prevista for bastante superior à atual."));
+ const row=el("div","tools"),sel=new Set();
+ AXL.forEach(([k,l])=>{const b=el("button","",l);b.onclick=()=>{if(sel.has(k)){sel.delete(k);b.classList.remove("on")}else{sel.add(k);b.classList.add("on")}};row.appendChild(b)});
+ const go=el("button","go","Recomendar"),msg=el("span","sub");row.append(go,msg);box.appendChild(row);
+ const out=el("div");box.appendChild(out);
+ go.onclick=async()=>{if(!sel.size){msg.textContent="escolhe pelo menos uma skill";return}
+  go.disabled=true;msg.textContent="a calcular…";out.replaceChildren();
+  let r;try{r=await post("/api/recommend",{id:uid,skills:[...sel]})}catch(e){r={error:"sem ligação ao servidor"}}
+  go.disabled=false;if(r.error){msg.textContent=r.error;return}
+  msg.textContent=`${r.items.length} sugestões · candidatos: ${r.counts.novo} novos, ${r.counts.rejogar} a repetir, ${r.counts.tentar_de_novo} a tentar de novo`;
+  const lv=r.player.levels;out.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
+  const cols=[{h:"#",sort:x=>x.rank,render:x=>String(x.rank)},
+   {h:"Mapa",sort:x=>x.label.toLowerCase(),num:false,cls:"wrap",render:x=>{const a=el("a","lk",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";const w=el("span");w.appendChild(a);w.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));return w}},
+   {h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
+   {h:"Desafio",sort:x=>x.delta[r.skills[0]],render:x=>r.skills.map(a=>a+" "+(x.delta[a]>=0?"+":"")+x.delta[a].toFixed(1)).join(" · ")},
+   {h:"≥88 %",sort:x=>x.p88,render:x=>Math.round(x.p88*100)+" %"},{h:"Acc prov.",sort:x=>x.acc_pred,render:x=>(x.acc_pred*100).toFixed(1)+" %"},
+   {h:"Acc atual",sort:x=>x.acc_cur,render:x=>x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"},
+   {h:"pp est.",sort:x=>x.pp_gain_pct,render:x=>x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"},
+   {h:"Estilo",sort:x=>x.style_pct,render:x=>x.style_pct.toFixed(0)},
+   {h:"Porquê",sort:x=>x.why,num:false,cls:"wrap",render:x=>{const d=el("span","sub",x.why);return d}},
+   {h:"Feedback",sort:x=>0,render:x=>{const w=el("span"),done=t=>{w.replaceChildren(el("span","sub",t))};
+     const y=el("button","","Serve"),n=el("button","","Não serve");
+     y.onclick=async()=>{await post("/api/rec_feedback",{id:uid,beatmap_id:x.beatmap_id,verdict:"serve",skills:r.skills,kind:x.kind,score:x.score});done("obrigado: serve")};
+     n.onclick=async()=>{await post("/api/rec_feedback",{id:uid,beatmap_id:x.beatmap_id,verdict:"nao_serve",skills:r.skills,kind:x.kind,score:x.score});done("obrigado: não serve")};
+     w.append(y,n);return w}}];
+  r.items.forEach((x,i)=>x.rank=i+1);
+  out.appendChild(sortable(cols,r.items,0,1));
+  (r.notes||[]).forEach(t=>out.appendChild(el("div","sub","· "+t)))};
+ return box}
+
 function renderMap(r){
  const out=[],h=el("div");h.appendChild(el("p","big",r.label));
  h.appendChild(el("div","sub",`#${r.beatmap_id}${r.creator?" · mapper "+r.creator:""} · ${r.status||""} · ${n2(r.difficulty_rating)}★ (API, sem mods)${r.has_file?"":" · sem ficheiro .osu"}`));out.push(h);
@@ -177,7 +212,7 @@ if(!fromHash())setMode(mode);
 </script></body></html>"""
 
 
-def actions(explorer: Explorer, checker: Any | None = None) -> dict[str, Callable[[dict], Any]]:
+def actions(explorer: Explorer, checker: Any | None = None, recommender: Any | None = None) -> dict[str, Callable[[dict], Any]]:
     def _int(body: dict, key: str = "id") -> int | None:
         try:
             return int(body.get(key))
@@ -202,7 +237,29 @@ def actions(explorer: Explorer, checker: Any | None = None) -> dict[str, Callabl
             return {"error": "verificação manual indisponível neste painel"}
         return checker.force(uid)
 
+    def recommend(body: dict) -> dict:
+        uid = _int(body)
+        if uid is None:
+            return {"error": "jogador inválido"}
+        if recommender is None:
+            return {"error": "recomendador indisponível neste painel"}
+        skills = body.get("skills") if isinstance(body.get("skills"), list) else []
+        return recommender.recommend(uid, [str(x) for x in skills])
+
+    def rec_feedback(body: dict) -> dict:
+        uid, bid = _int(body), _int(body, "beatmap_id")
+        if uid is None or bid is None or recommender is None:
+            return {"error": "pedido inválido"}
+        skills = body.get("skills") if isinstance(body.get("skills"), list) else []
+        try:
+            score = float(body["score"]) if body.get("score") is not None else None
+        except (TypeError, ValueError):
+            score = None
+        return recommender.feedback(uid, bid, str(body.get("verdict") or ""), [str(x) for x in skills], str(body.get("kind") or ""), score)
+
     return {
+        "/api/recommend": recommend,
+        "/api/rec_feedback": rec_feedback,
         "/api/check": check,
         "/api/players": lambda body: explorer.search_players(str(body.get("q") or "")),
         "/api/maps": lambda body: explorer.search_maps(str(body.get("q") or "")),

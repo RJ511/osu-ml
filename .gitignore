@@ -8,3 +8,7 @@ __pycache__/
 .venv/
 *.tar.bz2
 reports/
+pack/
+dist/
+p.out
+*.prof
