@@ -659,8 +659,88 @@ jogadores únicos** nos scores aleatórios + 10 000 do top. `top_10000` = 56,6 M
 - **Validação com jogadores da API** (`osuml analyze reach-api-check`, BD local, 0 pedidos; `analysis/reach_api_check.py`): **o modelo novo NÃO é melhor que o
   antigo nestes jogadores** (AUC temporal ≈ 0,72 nos dois; pior nas metades enviesadas) e é **mais conservador** (previsto médio 0,25 vs observado 0,53 em ≥88 %).
   **Ordena bem** (monótono) mas **subestima**: previsto 0,2-0,3 ⇒ observado 0,62; 0,4-0,5 ⇒ 0,71 (temporal, n=2 874, 71 jogadores). Causa provável: a BD só guarda
+<<<<<<< HEAD
+  best+recent (viés de seleção) e o nº de passes do perfil é bem menor que nos dumps. Medido também: quando o modelo "esperava" 80-84 %, esses jogadores
+  tinham **mediana de 95 % nos passes** e 66 % chegavam a ≥ 88 % (PXD Vieira: esperado 85 %, real 94 %).
+- **Regra do utilizador (2026-09-24): "abaixo de 88 % não se aprende; por volta de 93 % aprende-se" ⇒ nenhuma sugestão pode ter accuracy esperada < 88 %.**
+  Antes o filtro era P(≥88 %) ≥ 0,30 e a "accuracy provável" (mediana do modelo bruto) ficava nos 80 — incoerente. Agora: (1) **calibração** dos modelos para jogadores da API
+  (`analysis/reach_calibration.py`, `osuml analyze reach-calibrate` → `models/calibration.json`, incluída no pacote): `logit(p_cal) = a + b·logit(p_bruto)` por limiar, ajustada a
+  2 874 pares fora-do-tempo de 71 jogadores; **validação cruzada por jogador**: ECE 0,28 → 0,03 e Brier 0,298 → 0,212 em ≥ 88 % (a ordenação não muda; é monótona);
+  (2) o score favorece a zona de aprendizagem: `0,35·desafio + 0,30·P(≥93 %) + 0,15·P(≥88 %) + 0,20·estilo`.
+  **Comparação medida (lista antiga vs calibrada)**: a lista antiga reproduz-se exactamente; das 160 sugestões, 102 mantiveram-se, mas a subida dos números (P88 mediana 36-43 % → 61-72 %,
+  accuracy 81-85 % → 92-95 %) foi **quase toda re-escala**: avaliada com o modelo bruto, a lista nova continua com P88 27-45 % e accuracy 79-85 %. Dizer "corrigi" foi exagero.
+  **Decisão do utilizador (opção 1)**: critério **estrito** = accuracy esperada ≥ 88 % pelo modelo **bruto** (`MIN_REACH_NEW = 0,50` sobre P(≥88 %) bruta; `MIN_EXPECTED_ACC` também para repetir).
+  Só se houver **menos de 10** sugestões seguras (`MIN_SAFE_ITEMS`) se completa (até `n`) com as que só o modelo **calibrado** aceita; as seguras ficam sempre primeiro. Cada item traz
+  `tier` (`seguro`/`provavel`), `acc_raw`/`acc_cal`, `p88_raw`/`p88_cal`; as UIs mostram "Nível". `LightGbmPredictor.predict_both` devolve (bruto, calibrado); `predict` = calibrado.
+  Resultado (PXD Vieira / gaaGOD, 4 skills): Aim 20 seguras (ambos), Stamina 11 (PXD) / 8+12 (gaaGOD), Reading 18 (ambos), **Speed só 3 seguras** (desafio +1,4…+1,8) + 17 prováveis
+  (desafio até +6): subir Speed a valer com ≥ 88 % esperado quase não tem mapas. **Limite**: a calibração usa mapas que o jogador escolheu jogar (viés de seleção); a verdade está entre o bruto e o
+  calibrado — o feedback "Serve / Não serve" é o que o decide. Modelo cru: `LightGbmPredictor(calibration=False)`.
+- **Redesenho final (2026-09-24, pedido do utilizador): accuracy À TILLERINO + P(passar) — substitui as camadas bruto/calibrado acima.** O utilizador esclareceu que "accuracy" é a
+  accuracy que se faz **quando se passa o mapa** e que interessa também **não morrer no mapa** (P(passar) ≥ 80 %). Os modelos `reach` respondiam a outra pergunta (P(melhor tentativa passa E ≥ X %),
+  falhas = 0), por isso o "acc esperada" deles misturava passar com accuracy (nos jogadores da API "esperado 84 %" ⇒ mediana real dos passes 95 %). Agora o recomendador usa duas quantidades:
+  (1) **P(passar)**: `pass_model_A` (dumps; AUC 0,79) **calibrado** com jogadores da API (`analysis/pass_calibration.py`, `osuml analyze pass-calibrate` → `models/calibration_pass_acc.json`;
+  `logit(p_cal) = 1,66 + 0,85·logit(p)`; validação cruzada por jogador: ECE 0,35 → 0,018, Brier 0,317 → 0,188; previsto 0,75 → observado 0,74, 0,85 → 0,83; sem calibração previsto 0,49 → observado 0,83);
+  (2) **accuracy esperada se passar**: novo modelo `acc_pass_A` (`analysis/acc_model.py`, `osuml analyze acc-model`; LightGBM `regression_l1` = mediana do melhor passe do par; treinado no pod com 18,8 M pares
+  que passaram / 46 738 jogadores, teste em 9 257 nunca vistos: **MAE 3,7 pontos, R² 0,45**; baselines: média do jogador MAE 4,9, mediana global 5,8). Nos jogadores da API quase não tem viés
+  (previsto 95,6 %, real 94,5 %; deslocamento −0,7 pts aplicado); prevista 90-93 ⇒ 82 % chegam a ≥ 88 %; prevista 93-95 ⇒ 90 %; prevista 88-90 ⇒ só 40 % (é a mediana).
+  **Regra**: P(passar) ≥ 0,80 **e** accuracy esperada ao passar ≥ 0,88 (ideal ~0,93; o score favorece ~93 %: `0,35·desafio + 0,25·aprendizagem(acc~93 %) + 0,20·P(passar) + 0,20·estilo`); se houver < 10
+  sugestões assim (`MIN_SAFE_ITEMS`), completa-se com P(passar) ≥ 0,70 (`arriscado`; a accuracy continua ≥ 88 %). Tiers: `seguro`/`arriscado`. Campos: `p_pass`, `acc_pass`, `p_pass_raw`, `acc_pass_raw`.
+  `PassAccPredictor` (calibration=False dá o bruto). `LightGbmPredictor`/reach ficam só para análise (`reach-api-check`, `reach-calibrate`). Pacote: `pass_model_A.txt`, `acc_pass_A.txt`, `calibration_pass_acc.json`.
+  **Resultado**: as 8 listas (PXD Vieira/gaaGOD × 4 skills) dão 20 sugestões `seguro` cada, P(passar) 80-84 %, accuracy se passar mediana 93-96 %, mínimo 90 %; desafio Speed +2,1…+6,1 (PXD).
+  **Limites**: a calibração usa mapas que o jogador escolheu jogar (viés otimista); **não usa o historial do próprio jogador no mapa** (ex.: 176960 — o PXD falhou 3 vezes a 22/09 com 88-93 % de accuracy até
+- **Comparação com a realidade (jogadas do PXD Vieira a 24/09, 21 mapas / 65 plays; perfil só até 23/09) e perfil de FORMA ATUAL** (`analysis/profile_form.py`, pedido do utilizador: mais peso às jogadas
+  recentes, só passes, com cuidado com as fáceis). Achados: P(passar) previsto 81 % = observado 81 % (17/21 mapas), mas **por tentativa só 35 % (23/65; 1.ª tentativa 43 %)** — o "passar" do modelo é "acaba por passar";
+  23 das 42 falhas foram a ≥ 88 % (reinícios, inferência). Accuracy se passar: prevista 96,6 % vs real 94,5 % (viés +2,8) e, nos mapas > +3 acima do nível, 95,8 vs 91,3 (+4,3; os 4 mapas que já estavam nas
+  listas: 95-96,6 previsto, 84,8-91,5 real). Nos 73 jogadores da API o viés da accuracy é ≤ 1,3 pontos e **não cresce com a exigência**; o P(passar) é ~7 pts optimista a +3..+6 acima do nível e ~12 a > +6.
+  Causa provável no PXD: o perfil era o pico (185 dos 249 passes com > 6 meses; mediana 147 pp vs 113 pp nos recentes; gama recente ~105-200 pp).
+  **Perfil de forma**: 1 passe por mapa (maior pp); peso = recência (`0,25 + 0,75·0,5^(idade/45 d)`, idade desde o último passe do jogador) × esforço (chão = P25 e teto = P95 dos passes dos últimos 90 dias, até 60;
+  pp ≤ chão pesa `EASY_W`, sobe até 1 a meio da gama); estatísticas ponderadas (p50/p90, acc média, DT/HD/HR; "máx" só com peso ≥ 0,22); `k` e vetor iguais ao de treino ⇒ **mesmo modelo, sem re-treino**.
+  Medido (perfil antes do corte): PXD 24/09 viés da accuracy base +2,8 → recência +1,4 → forma(EASY_W 0,5) **+1,8** → forma(0,2, "esforço forte") +2,0; população (73 jogadores, 3 531 pares) AUC 0,743 → 0,747 (recência)
+  / **0,745 (forma 0,5)** / 0,737 (forma 0,2); MAE 3,2 → 3,1. Adoptado **`EASY_W = 0,5`** (a versão forte piorou a população: empurra o perfil para cima). Recalibrado com o mesmo perfil (`pass-calibrate` v2:
+  `logit(p_cal) = 1,52 + 0,86·logit(p)`, ECE 0,32 → 0,019 em CV por jogador; acc deslocamento −1,05 pts). `Recommender(profile_mode="form"|"recency"|"base")`. Efeito prático pequeno: níveis do PXD 76/70/71,9/68,1
+  (antes 75/69,6/71,2/67,4), Speed +1,5…+4,3. Pacote atual: `…0e69cefab468-passacc2.zip` (substitui `passacc1`). **Limite**: 8 mapas de desafio num só jogador não provam a causa; é preciso mais dias de dados.
+- **BUG DE DADOS corrigido (2026-09-25) — invalida conclusões anteriores sobre jogadores da API.** (1) A API devolve `passed: false` em scores **legacy** (do stable, `legacy_score_id`) com rank A..XH; 3 002 scores de 31 dos 73 jogadores
+  estavam a entrar como "falhas" (e todos eram posteriores a 01/09 ⇒ contaminavam a validação temporal e a calibração). Fix em `storage/normalize.effective_passed` (legacy com rank ≠ F ⇒ passe) + UPDATE na BD (cópia
+  `data/osuml.db.bak-2026-09-25`); lazer: `passed` é fiável (falhados = rank F, 2 060). (2) **O stable não envia falhas**: nos jogadores de stable só há passes ⇒ a "taxa de passar" fica inflacionada (85 % vs ~65 % no lazer).
+  Por isso `pass_calibration` calibra P(passar) **só com pares com tentativas do lazer** (1 684 pares, 48 jogadores; `a=1,92, b=0,91`; ECE 0,37 → 0,025 em CV) e a accuracy usa todos os passes (n=3 039; viés +3,1 pts; deslocamento −1,6).
+  As conclusões "o modelo subestima muito nos jogadores da API" e as tabelas de fiabilidade anteriores estavam contaminadas por isto.
+- **Pontos de falha** (`analysis/fail_points.py`, `osuml analyze fail-points`, resultados em `data/processed/analysis/fail_points/v1/`): 2 060 falhas reais (lazer, rank F, 35 jogadores); 1 560 analisadas (580 dos 805 mapas estão no bundle v1).
+  **Progresso** = (great+ok+meh+miss)/máx great — validado: correlação **0,95** com a duração real da jogada (o "62 % a ≥ 90 %" inicial era só um artefacto dos scores legacy mal marcados). **Morte vs reinício** (pedido do utilizador) com o modelo de HP do
+  lazer (`DrainingHealthProcessor`/`OsuHealthProcessor`): vida mínima de um jogo perfeito 0,99/0,90/0,40 (HP 0/5/10); dano por miss = 0,03+pen (0,03/0,125/0,20), meh 0,028, ok 0,019, tick grande falhado 0,015+pen (0,02/0,075/0,14); **só
+  pode ter morrido se o dano ≥ vida mínima** (`reinicio_certo` se não), `morte_provavel` se ≥ 1,5×. HR ×1,4 no HP, EZ excluído. **Validação independente**: reinícios certos (908) caem em trechos fáceis (percentil de intensidade da janela de 10 s
+  0,24; mediana 7 % do mapa, 1 miss), mortes (623) em trechos intensos (0,64; mediana 24-49 % do mapa, 5-10 misses). PXD Vieira: 71 falhas = 46 reinícios certos + 25 possíveis mortes (janela: 4,3 obj/s, 164 px, 37 % sliders). Limites: HP sem a
+  ordem dos erros (pior caso), sem breaks; janelas = densidade/espaçamento/velocidade/streams/sliders/"intensidade".
+- **Registo de previsões + comparação automática** (`recommend/log.py`, tabelas `prediction_log`/`shadow_state`, `osuml eval-log [--since D --batch day|new] [--report-only]`, chamado no fim do `poll` quando há jogadores consultados; 0 pedidos):
+  grava cada recomendação (com o modelo) e faz **avaliação-sombra** de QUALQUER mapa jogado (perfil só até ao início das jogadas novas); resultado por par = tentativas, passou, 1.ª tentativa, melhor accuracy, reinícios/mortes.
+  Histórico desde 01/09 (3 843 pares, 73 jogadores; lazer n=1 786): P(passar) previsto 0,72 vs observado **0,68** (1.ª tentativa 0,62; previsto 0,75 → 0,68, 0,85 → 0,82, 0,94 → 0,89: ligeiramente optimista); **tentativas do lazer (3 065): 43 % passes,
+  33 % reinícios certos, ≤ 23 % mortes possíveis** (por tentativa "não morrer" ≥ 77 %); accuracy ao passar viés **+1,6 pts**, MAE 4,2, **sem dependência da exigência** (1,5 / 1,7 / 1,8); viés por jogador varia de −0,6 a +5,1 pts (NBAH +5,1, LemonBread741 +4,8,
+  Skinny_Ferny −0,6) ⇒ vale a pena uma **correção por jogador** (**já aplicada**, ver abaixo) e **recalibração periódica** em vez de re-treino constante (re-treino só com dumps novos).
+- **Correção por jogador + recalibração (2026-09-25)** (`recommend/adjust.py`; `osuml recommend recalibrate [--apply]`): `models/player_adjust.json` (por jogador: `acc_bias` encolhido `Σd/(n+10)`, `pass_offset` no logit `Σ(y−p)/(Σp(1−p)+1/τ²)`, τ=0,5; só com
+  ≥ 5 / ≥ 10 pares; estima-se **só** com as avaliações-sombra, a partir dos valores BRUTOS + a calibração global atual, para não ser circular; o registo das recomendações grava os valores do MODELO, antes da correção). Aplica-se em `Recommender.recommend` (relê o ficheiro se mudou:
+  o `poll` é outro processo e atualiza-o no fim de cada avaliação, e o `eval-log` também). **Validação fora do tempo** (cada previsão só com o passado do jogador; 3 843 pares): MAE da accuracy 4,37 → 4,07 pts (K=10; 4,01 se encolher para o viés global), Brier de P(passar) 0,195 → 0,183
+  (τ=0,5). Efeito real: PXD Vieira acc −1,8 pts e P(passar) −0,49 no logit ⇒ a lista "segura" muda por completo (0/20 em comum); gaaGOD −0,2 pts / −0,16 (11/20 em comum). O pacote leva o `player_adjust.json` só dos jogadores do pacote (**o pacote S3 `passacc3` ainda não o tem: refazer e
+  reenviar quando se quiser**). **`recalibrate`** refaz a calibração global (Platt + deslocamento da accuracy) com o registo (só lazer; ≥ 500 pares e ≥ 30 jogadores) e só grava com `--apply` **e** se a validação cruzada por jogador melhorar (Brier ≥ 0,002 / MAE ≥ 0,0005; guarda `.bak-<data>`).
+  Hoje (1 786 pares lazer, 48 jogadores) NÃO compensa: Brier 0,1815 → 0,1801 (ECE 0,058 → 0,028) ⇒ nada foi alterado. Cadência sugerida: correr o `recalibrate` (simulação) ~1×/mês; re-treinar o modelo só com dumps novos.
+- **Mapas bloqueados** (`recommendation_blocks`; `Recommender.block_map/unblock/blocks`, `parse_map_ref`): preferência do jogador de NÃO receber um mapa — `set` (omissão: o mapa inteiro, todas as dificuldades, via `set_id` do índice) ou `diff` (só essa dificuldade; também quando o set é desconhecido, ~21 mil mapas sem `set_id`). Por jogador, sem duplicados,
+  aplicado na elegibilidade (também conta em `player.n_blocked`), independente do "Não serve" (que só regista). Cada (des)bloqueio acrescenta uma linha ao TSV de feedback (`bloquear_mapa`/`bloquear_dificuldade`/`desbloquear`). UI: botões "Não recomendar o mapa" / "só esta dificuldade" em cada sugestão + campo para colar link/ID + lista com "Desbloquear",
+  na app autónoma (8770) e no Explorar (8765) (`/api/block|unblock|blocks`, `/api/rec_block|rec_unblock|rec_blocks`). Aceita links `beatmapsets/<set>#osu/<id>`, `/beatmaps/<id>`, `/b/<id>` e IDs soltos (ID solto = dificuldade).
+- **Manutenção agendada (2026-09-25)** (`src/osuml/maintenance.py`, `osuml maintenance {status,monthly-sim,dumps-check,pack-check,retrain-plan [--prepare],retrain-finish}`; estado em `data/control/maintenance_state.json`, log em `data/logs/maintenance.jsonl`, 0 pedidos à osu!API):
+  - **`osuml-manut-mensal`** (Task Scheduler, dia 1 às 03:20): `monthly-sim` simula a recalibração e escreve `data/reports/manutencao/AAAA-MM.{txt,json}`; nunca altera a calibração (aplicar é `recommend recalibrate --apply`).
+  - **`osuml-dumps-check`** (diária 10:15; só age nos dias 1–7): procura na listagem do data.ppy.sh um dump **completo** (`random_10000` + `top_10000` + `osu_files` da mesma data) mais recente que `trained_snapshot` (hoje `2026_09_01`); se houver, escreve `data/control/retrain_pending.json`.
+  - **`osuml-retreino`** (tarefa do Claude, `~/.claude/scheduled-tasks/osuml-retreino`, dias 2–7 às 11:30; corre com a app aberta, senão na próxima abertura): sem `retrain_pending.json` termina logo; com ele segue **`docs/retreino_mensal.md`** (pod RunPod cpu5g 16 vCPU 0,736 $/h, ~2–3 h ≈ 1,5–2,5 $, máx. 5 h; envia código+Parquet antigos, o pod descarrega só o dump novo; `scripts/pod_pipeline.py --random-snaps S --top-snap S --osu-files-snap S`;
+    descarrega `retrain_outputs.tar`, **para** o pod, e `retrain-finish` instala). O `retrain-finish` **recusa** modelos piores (AUC −0,02 / MAE +0,004), reconstrói o índice e recalibra em pastas `*_new`, e só depois troca (as antigas ficam `*_prev_<data>`); recalibra com API só **depois** do dump (senão há fuga; com poucos pares mantém a calibração antiga) e refaz a avaliação-sombra de 90 dias com o modelo novo
+    (os ajustes por jogador só usam previsões do modelo atual: `model_fp`). Uma falha não se repete sozinha (`retrain_failed.json`). **Ainda não foi exercitado de ponta a ponta num pod** (só os passos locais, com fakes, em `tests/test_maintenance.py`): o 1.º retreino real (dumps de 2026_10_01) deve ser acompanhado.
+  - **`osuml-pack-check`** (semanal, domingo 05:10): reconstrói e envia o pacote para o S3 privado (`recommend/osuml-pack-<modelo>-<AAAAMMDD>.zip`) **só se for pertinente**: nunca enviado, ou modelo/calibração/índice mudaram, ou a correção de um jogador do pacote mudou ≥ 1 pt de accuracy ou ≥ 0,15 no logit de P(passar) (e há ≥ 7 dias do último envio). Chaves antigas ficam no bucket (limpar à mão). 1.º envio real feito: `recommend/osuml-pack-0e69cefab468-20260925.zip` (155 322 921 B; leva `player_adjust.json` dos 2 jogadores).
+  - Pipeline do pod atualizado: passa a treinar também o **modelo da accuracy ao passar** (antes só o `reach`, obsoleto), não volta a descarregar dumps já tratados e devolve `retrain_outputs.tar`. `build_pack` já não rebenta com jogadores sem scores.
+  - **Achado**: a tarefa `osuml-collect` (PXD Vieira de 12 em 12 h) **não existe** no agendador (só `osuml-poll`); o último pedido de scores do PXD foi hoje 07:57 UTC (provavelmente manual/painel).
+- **Explorar → mapas do catálogo** (2026-09-25): a lista de mapas só mostrava os **8 493** mapas com plays dos 75 jogadores da API (a BD só guarda metadados desses). O Explorar usa agora também o índice do recomendador (`Recommender.catalog()`, sem carregar modelos): **152 721 mapas** (152 268 do catálogo + 453 só da BD); pesquisa por texto/id de mapa/id de set
+  (os que têm plays acompanhados vêm primeiro, `catalog_only` para os restantes) e ficha com atributos reais por mods do `catalog/v2/map_attributes.parquet` (notas 0-100 só sem mods; sem plays). ~0,8 s por pesquisa.
+  Pacote atual: `…0e69cefab468-passacc3.zip` (dados corrigidos; substitui `passacc2`).
+  falhar — sai com P(passar) 81 %); melhor passe do par é ligeiramente optimista face a uma jogada avulsa. Pod `9s66ow1w5hs1si` (criado porque o `1v…` já não arranca por falta de memória no servidor) **parado**.
+=======
   best+recent (viés de seleção) e o nº de passes do perfil é bem menor que nos dumps. Por isso **`MIN_REACH_NEW` desceu de 0,40 para 0,30** (observado 0,53-0,66 ⇒
   "mais provável que não"). Os "≥88 %: X %" mostrados são a probabilidade do modelo (conservadora), não calibrada para a API.
+>>>>>>> 1fd4ed8237a250a90eddb31372b41293d0503fb7
 - **Índice v2** (`data/processed/recommend/index/`, antigo em `index_old25`; modelos antigos em `models_old25`): 152 268 mapas, matriz CF com 34 802 jogadores
   (50 %), 57 M pares, etiquetas 152 268 (130 184 com `set_id`). **Recomendador**: só prevê para candidatos plausíveis (`_predict_all(rows=)`) ⇒ **6 s** (era 29 s com o
   catálogo grande). PXD Vieira/speed: 493 candidatos novos; gaaGOD: 249 (speed +3,6…+4,7, outros eixos abaixo do nível).
@@ -671,7 +751,11 @@ jogadores únicos** nos scores aleatórios + 10 000 do top. `top_10000` = 56,6 M
   impressão digital do modelo (novo `af8fe9c4933d`; antigo `1194cf78e401`) e o resumo do treino (`models/training.json`). **Distribuição** (decisão do utilizador): **código
   público no GitHub; pacote de dados à parte (privado)**, descompactado em `./pack` — dados derivados dos dumps (licença: só análise estatística) **não** vão numa release pública.
   Pacote `dist/osuml-pack.zip` (168 MB; só PXD Vieira + gaaGOD, colunas mínimas, sem JSON cru da API) **enviado ao bucket privado**
+<<<<<<< HEAD
+  `s3://osu-ml-skill/recommend/osuml-pack-0e69cefab468-passacc3.zip` (AES256, SHA-256 verificado; **esta é a versão a usar**; `passacc1` = perfil sem forma atual: modelos P(passar)+accuracy se passar; as anteriores `…af8fe9c4933d*.zip` são do modelo `reach`, obsoleto). Testado numa instalação limpa (só código + pacote, sem `data/` nem `.env`).
+=======
   `s3://osu-ml-skill/recommend/osuml-pack-af8fe9c4933d.zip` (AES256, SHA-256 verificado `b0e37d9c…`). Testado numa instalação limpa (só código + pacote, sem `data/` nem `.env`).
+>>>>>>> 1fd4ed8237a250a90eddb31372b41293d0503fb7
   Falta: o bloqueio de acesso público do bucket não se conseguiu verificar (IAM sem permissão) — confirmar na consola AWS.
 - **Credenciais AWS estão no `.env`** (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`): o `boto3` só as vê depois de `Settings.from_env` carregar o `.env`; um teste feito
   fora disso deu falso negativo. Painel: a estimativa de tempo usa a **velocidade dos últimos 3 min** (a média desde o início enganava quando havia uma fase inicial sem passos).
@@ -714,7 +798,11 @@ Tabelas: `runs`, `api_requests`, `users`, `scores` (PK `score_id`), `score_obser
 
 ## Convenções
 
+<<<<<<< HEAD
+- Correr `pytest` antes de dar uma alteração por concluída (223 testes, 1 só corre em Linux; todos devem passar).
+=======
 - Correr `pytest` antes de dar uma alteração por concluída (175 testes, 1 só corre em Linux; todos devem passar).
+>>>>>>> 1fd4ed8237a250a90eddb31372b41293d0503fb7
   Testes nunca fazem pedidos reais: usar `httpx.MockTransport`.
 - **Nunca apagar `data/raw/`**. Respostas raw são gravadas antes de normalizar.
 - Datas guardadas em UTC *naive*.

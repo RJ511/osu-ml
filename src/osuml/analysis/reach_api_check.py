@@ -51,7 +51,9 @@ def run_reach_api_check(store, index_dir: Path, models_dir: Path, out_dir: Path,
     from ..recommend.core import Recommender
     from ..storage import models as m
 
-    rec = Recommender(store, index_dir, models_dir)
+    from ..recommend.core import LightGbmPredictor
+
+    rec = Recommender(store, index_dir, models_dir, predictor=LightGbmPredictor(models_dir))
     ok, why = rec.ready()
     if not ok:
         raise RuntimeError(why)

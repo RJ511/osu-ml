@@ -26,13 +26,17 @@ a{color:var(--acc)}.tag{border:1px solid var(--line);border-radius:5px;padding:1
 .tblwrap{overflow-x:auto}
 </style></head><body><main>
 <h1>Recomendar mapas</h1>
-<div class="sub">Escreve um jogador que já esteja na base de dados, escolhe a(s) skill(s) que queres melhorar e recebe mapas que te desafiem nelas, alcançáveis e do estilo de jogadores parecidos. Não faz nenhum pedido à API do osu!.</div>
+<div class="sub">Escreve um jogador que já esteja na base de dados, escolhe a(s) skill(s) que queres melhorar e recebe mapas que te desafiem nelas, que deves conseguir passar (P(passar) ≥ 80 %) com accuracy esperada de pelo menos 88 % (ideal ~93 %), do estilo de jogadores parecidos. Não faz nenhum pedido à API do osu!.</div>
 <div class="card">
  <div class="row"><input id="player" list="players" placeholder="Nome do jogador (ex.: PXD Vieira)" autocomplete="off"><datalist id="players"></datalist><span class="sub" id="pinfo"></span></div>
  <div class="row" id="skills"></div>
  <div class="row"><button class="go" id="go">Recomendar</button><span class="sub" id="msg"></span></div>
 </div>
 <div id="out"></div>
+<div class="card" id="blkcard" style="display:none"><b>Mapas que não queres receber</b>
+ <div class="sub">Preferência tua: o mapa deixa de ser recomendado (todas as dificuldades do mapa, ou só uma, à tua escolha). Podes bloquear a partir da lista de sugestões ou colar aqui o link / ID do mapa.</div>
+ <div class="row"><input id="blkref" placeholder="Link ou ID (ex.: https://osu.ppy.sh/beatmapsets/123#osu/456)"><button id="blkset">Bloquear o mapa inteiro</button><button id="blkdiff">Só esta dificuldade</button><span class="sub" id="blkmsg"></span></div>
+ <div id="blklist"></div></div>
 <div class="sub" id="fbfile"></div>
 </main>
 <script>
@@ -46,28 +50,52 @@ SK.forEach(([k,l])=>{const b=el("button","",l);b.onclick=()=>{if(sel.has(k)){sel
 let players=[];
 fetch("/api/state").then(r=>r.json()).then(s=>{players=s.players||[];const dl=$("players");players.forEach(p=>{const o=document.createElement("option");o.value=p.username;dl.appendChild(o)});
  $("pinfo").textContent=players.length?players.length+" jogador(es) disponíveis: "+players.map(p=>p.username).join(", "):"sem jogadores na base de dados";$("fbfile").textContent=(s.feedback_file?"O feedback fica guardado em: "+s.feedback_file+" · ":"")+(s.model&&s.model.fingerprint?"Modelo "+s.model.fingerprint+(s.model.training&&s.model.training.players?" (treinado com "+s.model.training.players+" jogadores)":""):"sem modelo carregado")});
+let blkPlayer="";
+async function loadBlocks(){
+ const name=$("player").value.trim();if(!name){$("blkcard").style.display="none";return}
+ let r;try{r=await post("/api/blocks",{player:name})}catch(e){return}
+ if(r.error){$("blkcard").style.display="none";return}
+ blkPlayer=name;$("blkcard").style.display="";const box=$("blklist");box.replaceChildren();
+ if(!r.items.length){box.appendChild(el("div","sub","Nenhum mapa bloqueado."));return}
+ const tb=el("table"),hd=el("tr");["Mapa","Âmbito","Desde",""].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
+ r.items.forEach(b=>{const tr=el("tr"),tm=el("td"),a=el("a","",b.label||("mapa "+(b.beatmapset_id||b.beatmap_id)));a.href=b.url;a.target="_blank";a.rel="noopener noreferrer";tm.appendChild(a);
+  tm.appendChild(el("div","sub",(b.beatmap_id?"ID "+b.beatmap_id:"")+(b.beatmapset_id?" · set "+b.beatmapset_id:"")));tr.appendChild(tm);
+  tr.appendChild(el("td","",b.scope==="set"?"mapa inteiro":"só esta dificuldade"));tr.appendChild(el("td","sub",(b.created_at||"").slice(0,10)));
+  const u=el("td"),ub=el("button","","Desbloquear");ub.onclick=async()=>{await post("/api/unblock",{player:blkPlayer,id:b.id});loadBlocks()};u.appendChild(ub);tr.appendChild(u);tb.appendChild(tr)});
+ box.appendChild(tb)}
+async function blockRef(scope){
+ const ref=$("blkref").value.trim();if(!ref){$("blkmsg").textContent="cola um link ou um ID";return}
+ const r=await post("/api/block",{player:$("player").value.trim(),ref,scope});
+ $("blkmsg").className="sub"+(r.error?" err":"");$("blkmsg").textContent=r.error||(r.already?"já estava bloqueado: ":"bloqueado: ")+(r.label||"");if(!r.error)$("blkref").value="";loadBlocks()}
+$("blkset").onclick=()=>blockRef("set");$("blkdiff").onclick=()=>blockRef("diff");
+$("player").addEventListener("change",loadBlocks);
 $("go").onclick=async()=>{
  const name=$("player").value.trim();if(!name){$("msg").textContent="escreve o nome de um jogador";return}
  if(!sel.size){$("msg").textContent="escolhe pelo menos uma skill";return}
  $("go").disabled=true;$("msg").textContent="a calcular…";$("out").replaceChildren();
  let r;try{r=await post("/api/recommend",{player:name,skills:[...sel]})}catch(e){r={error:"sem ligação ao servidor"}}
  $("go").disabled=false;if(r.error){$("msg").textContent=r.error;$("msg").className="sub err";return}
- $("msg").className="sub";$("msg").textContent=r.items.length+" sugestões para "+r.player.username+" · candidatos: "+r.counts.novo+" novos, "+r.counts.rejogar+" a repetir, "+r.counts.tentar_de_novo+" a tentar de novo";
+ $("msg").className="sub";loadBlocks();$("msg").textContent=r.items.length+" sugestões para "+r.player.username+" · candidatos: "+r.counts.novo+" novos, "+r.counts.rejogar+" a repetir, "+r.counts.tentar_de_novo+" a tentar de novo · com P(passar) ≥ 80 %: "+r.counts.sugestoes_seguras;
  const lv=r.player.levels,card=el("div","card");
  card.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
  const wrap=el("div","tblwrap"),tb=el("table"),hd=el("tr");
- ["#","Mapa","Tipo","★","Desafio","≥88 %","Acc prov.","Acc atual","pp est.","Estilo","Porquê","Feedback"].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
+ ["#","Mapa","Nível","Tipo","★","Desafio","P(passar)","Acc se passar","Acc atual","pp est.","Estilo","Porquê","Feedback"].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
  r.items.forEach((x,i)=>{const tr=el("tr");tr.appendChild(el("td","num",String(i+1)));
   const tm=el("td"),a=el("a","",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";tm.appendChild(a);tm.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));tr.appendChild(tm);
-  tr.appendChild(el("td","",KIND[x.kind]||x.kind));tr.appendChild(el("td","num",x.stars.toFixed(2)));
+  tr.appendChild(el("td","",x.tier==="seguro"?"seguro":"arriscado"));tr.appendChild(el("td","",KIND[x.kind]||x.kind));tr.appendChild(el("td","num",x.stars.toFixed(2)));
   tr.appendChild(el("td","num",r.skills.map(s=>s+" "+(x.delta[s]>=0?"+":"")+x.delta[s].toFixed(1)).join(" · ")));
-  tr.appendChild(el("td","num",Math.round(x.p88*100)+" %"));tr.appendChild(el("td","num",(x.acc_pred*100).toFixed(1)+" %"));
+  tr.appendChild(el("td","num",Math.round(x.p_pass*100)+" %"));tr.appendChild(el("td","num",(x.acc_pass*100).toFixed(1)+" %"));
   tr.appendChild(el("td","num",x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"));tr.appendChild(el("td","num",x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"));
   tr.appendChild(el("td","num",x.style_pct.toFixed(0)));tr.appendChild(el("td","why",x.why));
   const fb=el("td"),y=el("button","","Serve"),n=el("button","","Não serve");
   const send=async v=>{const res=await post("/api/feedback",{player:r.player.username,beatmap_id:x.beatmap_id,verdict:v,skills:r.skills,kind:x.kind,score:x.score});
    fb.replaceChildren(el("span",res.ok?"ok":"err",res.ok?(v==="serve"?"guardado: serve":"guardado: não serve"):(res.error||"erro")))};
-  y.onclick=()=>send("serve");n.onclick=()=>send("nao_serve");fb.append(y,n);tr.appendChild(fb);tb.appendChild(tr)});
+  y.onclick=()=>send("serve");n.onclick=()=>send("nao_serve");fb.append(y,n);
+  const blk=async scope=>{const res=await post("/api/block",{player:r.player.username,beatmap_id:x.beatmap_id,beatmapset_id:x.beatmapset_id,scope});
+   if(res.error){fb.replaceChildren(el("span","err",res.error));return}
+   tr.style.opacity=".45";fb.replaceChildren(el("span","ok",scope==="set"?"mapa bloqueado (não volta a ser recomendado)":"dificuldade bloqueada"));loadBlocks()};
+  const b1=el("button","","Não recomendar o mapa"),b2=el("button","","só esta dificuldade");b1.onclick=()=>blk("set");b2.onclick=()=>blk("diff");
+  fb.appendChild(el("br"));fb.append(b1,b2);tr.appendChild(fb);tb.appendChild(tr)});
  wrap.appendChild(tb);card.appendChild(wrap);(r.notes||[]).forEach(t=>card.appendChild(el("div","sub","· "+t)));$("out").appendChild(card)};
 </script></body></html>"""
 
@@ -107,4 +135,38 @@ def build_app(recommender: Any, port: int):
         return recommender.feedback(found[0], bid, str(body.get("verdict") or ""), [str(s) for s in skills], str(body.get("kind") or ""), score,
                                     str(body.get("note") or "")[:500])
 
-    return make_generic_server(PAGE, state, {"/api/recommend": recommend, "/api/feedback": feedback}, port)
+    def _player(body: dict):
+        return recommender.find_player(body.get("player"))
+
+    def block(body: dict) -> dict:
+        from .core import parse_map_ref
+
+        found = _player(body)
+        if found is None:
+            return {"error": "jogador não encontrado"}
+        bid, sid = None, None
+        if body.get("ref"):
+            bid, sid = parse_map_ref(body.get("ref"))
+            if bid is None and sid is None:
+                return {"error": "não percebi o mapa: cola um link do osu! ou o ID"}
+        else:
+            try:
+                bid = int(body["beatmap_id"]) if body.get("beatmap_id") is not None else None
+                sid = int(body["beatmapset_id"]) if body.get("beatmapset_id") else None
+            except (TypeError, ValueError):
+                return {"error": "mapa inválido"}
+        return recommender.block_map(found[0], beatmap_id=bid, beatmapset_id=sid, scope=str(body.get("scope") or "set"))
+
+    def unblock(body: dict) -> dict:
+        found = _player(body)
+        try:
+            bid = int(body.get("id"))
+        except (TypeError, ValueError):
+            return {"error": "pedido inválido"}
+        return recommender.unblock(found[0], bid) if found else {"error": "jogador não encontrado"}
+
+    def blocks(body: dict) -> dict:
+        found = _player(body)
+        return {"items": recommender.blocks(found[0])} if found else {"error": "jogador não encontrado"}
+
+    return make_generic_server(PAGE, state, {"/api/recommend": recommend, "/api/feedback": feedback, "/api/block": block, "/api/unblock": unblock, "/api/blocks": blocks}, port)

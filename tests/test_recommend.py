@@ -35,11 +35,13 @@ def test_median_accuracy_interpolates_where_probability_crosses_one_half():
 
 
 class StubPredictor:
-    """P(≥ t) decresce com a distância ao nível do jogador (gap_stars) e com o limiar t."""
+    """P(passar) desce com a distância em estrelas ao nível do jogador (`gap_stars`); a accuracy ao passar também."""
 
-    def predict(self, x):
+    def predict_both(self, x):
         gap = x[:, len(pm.MAP_FEATS) + len(pm.PROFILE_FEATS)]
-        return np.column_stack([1 / (1 + np.exp(2 * (gap + (t - 0.85) * 30 - 2.5))) for t in core.THRESHOLDS])
+        p = 1 / (1 + np.exp(4.0 * (gap - 1.19)))
+        acc = np.clip(0.97 - 0.015 * gap, 0.5, 1.0)
+        return {"p_pass": p, "p_pass_raw": p * 0.8, "acc": acc, "acc_raw": acc - 0.01}
 
 
 def _index():
@@ -90,8 +92,8 @@ def test_recommends_new_maps_above_the_players_level_in_the_chosen_skill(tmp_pat
     played_ids = {1000 + i for i in range(30)}
     for it in r["items"]:
         assert it["kind"] == "novo" and it["beatmap_id"] not in played_ids
-        assert it["delta"]["speed"] >= core.MIN_DELTA_NEW and it["p88"] >= core.MIN_REACH_NEW
-        assert "Musica" in it["title"] and it["url"].endswith(str(it["beatmap_id"])) and "≥88 %" in it["why"]
+        assert it["delta"]["speed"] >= core.MIN_DELTA_NEW and it["p_pass"] >= core.MIN_PASS_PROB_FALLBACK and it["tier"] in ("seguro", "arriscado")
+        assert "Musica" in it["title"] and it["url"].endswith(str(it["beatmap_id"])) and "probabilidade de passar" in it["why"]
     assert len({it["beatmap_id"] for it in r["items"]}) == len(r["items"])
     assert r["player"]["levels"]["speed"] > 50
 
@@ -111,7 +113,7 @@ def test_played_maps_return_only_when_the_predicted_accuracy_is_well_above_the_c
     assert 1026 not in by_id  # sem margem de melhoria previsível: não é repetido
     for x in r["items"]:
         if x["kind"] == "rejogar":
-            assert x["acc_pred"] - x["acc_cur"] >= core.MIN_ACC_GAIN and x["pp_gain_pct"] >= core.MIN_PP_GAIN_PCT
+            assert x["acc_pass"] - x["acc_cur"] >= core.MIN_ACC_GAIN and x["pp_gain_pct"] >= core.MIN_PP_GAIN_PCT
     assert r["counts"]["rejogar"] >= 1
 
 
@@ -209,13 +211,13 @@ def test_pack_contains_only_the_requested_players_and_minimal_columns(tmp_path):
     idx.mkdir(), mdl.mkdir()
     for f in ("index.npz", "meta.json", "cf_matrix.npz", "cf_users.npy", "labels.parquet"):
         (idx / f).write_bytes(b"x")
-    for t in core.THRESHOLDS:
-        (mdl / f"reach_acc{int(round(t * 100))}_A.txt").write_text("m")
+    for f in ("pass_model_A.txt", "acc_pass_A.txt"):
+        (mdl / f).write_text("m")
     out = build_pack(store, idx, mdl, tmp_path / "dist" / "pack.zip", ["teste"])
     assert out["players"] == {"Teste": 30}
     with zipfile.ZipFile(out["zip"]) as z:
         names = set(z.namelist())
-        assert {"pack/players.db", "pack/index/index.npz", "pack/models/reach_acc88_A.txt", "pack/LEIA-ME.txt", "pack/manifest.json"} <= names
+        assert {"pack/players.db", "pack/index/index.npz", "pack/models/pass_model_A.txt", "pack/models/acc_pass_A.txt", "pack/LEIA-ME.txt", "pack/manifest.json"} <= names
         assert not any("raw" in n for n in names)
         z.extract("pack/players.db", tmp_path / "x")
     from osuml.storage.database import Store
@@ -241,17 +243,17 @@ def test_model_info_identifies_the_loaded_model_and_pack_records_the_training(tm
     idx.mkdir(), mdl.mkdir()
     for f in ("index.npz", "meta.json"):
         (idx / f).write_bytes(b"x")
-    for t in core.THRESHOLDS:
-        (mdl / f"reach_acc{int(round(t * 100))}_A.txt").write_text("modelo-v1")
+    for f in ("pass_model_A.txt", "acc_pass_A.txt"):
+        (mdl / f).write_text("modelo-v1")
     res = tmp_path / "results.json"
-    res.write_text(json.dumps({"created_at": "2026-09-24", "data": {"players": 61000, "pairs_with_catalog": 5, "train_rows": 4, "test_rows": 3, "test_players": 2},
-                               "results": {"acc88": {"A": {"all": {"auc": 0.81}}}}}), encoding="utf-8")
+    res.write_text(json.dumps({"created_at": "2026-09-24", "data": {"players": 61000, "passed_pairs": 5, "test_players": 2},
+                               "results": {"model": {"mae": 0.037, "r2": 0.45}}}), encoding="utf-8")
     out = build_pack(store, idx, mdl, tmp_path / "p.zip", ["Teste"], training_results=res)
-    assert out["training"]["players"] == 61000 and out["training"]["auc_by_threshold"] == {"acc88": 0.81}
+    assert out["training"]["players"] == 61000 and out["training"]["acc_model"]["mae"] == 0.037
     rec = Recommender(store, idx, mdl, predictor=StubPredictor(), index=_index(), cf=(None, None))
     a = rec.model_info()["fingerprint"]
-    (mdl / "reach_acc88_A.txt").write_text("modelo-v2")  # outro modelo => outra impressão digital
-    assert rec.model_info()["fingerprint"] != a and rec.model_info()["n_models"] == 6
+    (mdl / "acc_pass_A.txt").write_text("modelo-v2")  # outro modelo => outra impressão digital
+    assert rec.model_info()["fingerprint"] != a and rec.model_info()["n_models"] == 2
 
 
 def test_recommendation_links_point_to_the_specific_difficulty_and_carry_the_ids(tmp_path):
@@ -260,3 +262,71 @@ def test_recommendation_links_point_to_the_specific_difficulty_and_carry_the_ids
     r = _rec(_store_with_player(tmp_path, _played()), tmp_path).recommend(7, ["speed"], n=5)
     for it in r["items"]:
         assert it["url"] == f"https://osu.ppy.sh/beatmapsets/{it['beatmapset_id']}#osu/{it['beatmap_id']}"
+
+
+def test_every_suggestion_can_be_passed_and_has_an_expected_accuracy_of_at_least_88_percent(tmp_path):
+    """Regra do utilizador: só se recomenda o que se consegue passar (P >= 80 %) e cuja accuracy esperada ao passar é >= 88 %."""
+    extra = [(24, True, 0.80, 60.0)]
+    rec = _rec(_store_with_player(tmp_path, _played(extra)), tmp_path)
+    for skills in (["speed"], ["aim", "stamina"], ["reading"]):
+        r = rec.recommend(7, skills, n=80)
+        assert r["items"]
+        for it in r["items"]:
+            assert it["acc_pass"] >= core.MIN_EXPECTED_ACC - 1e-6 and it["p_pass"] >= core.MIN_PASS_PROB_FALLBACK - 1e-6, (skills, it["label"])
+            assert (it["tier"] == "seguro") == (it["p_pass"] >= core.MIN_PASS_PROB - 1e-6)
+
+
+def test_platt_calibration_fixes_an_underconfident_model_and_keeps_the_order():
+    import numpy as np
+
+    from osuml.analysis.reach_calibration import apply_calibration, ece, fit_platt, logit, sigmoid
+
+    rng = np.random.default_rng(0)
+    p_true = rng.uniform(0.05, 0.95, 20000)
+    y = (rng.uniform(size=20000) < p_true).astype(float)
+    raw = sigmoid(logit(p_true) * 0.65 - 1.1)  # modelo que subestima e é "achatado"
+    a, b = fit_platt(y, raw)
+    cal = sigmoid(a + b * logit(raw))
+    assert ece(y, cal) < 0.03 < ece(y, raw)
+    assert (np.diff(cal[np.argsort(raw)]) >= -1e-12).all()  # monótona: não muda a ordenação
+    out = apply_calibration(np.column_stack([raw, raw]), {"acc85": {"a": a, "b": b}})
+    assert np.allclose(out[:, 0], cal) and np.allclose(out[:, 1], raw)  # só o limiar com parâmetros é alterado
+    assert apply_calibration(np.array([[0.3]]), None)[0, 0] == 0.3
+
+
+def test_safe_suggestions_come_first_and_risky_ones_only_fill_up_when_there_are_fewer_than_the_minimum(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "MIN_SAFE_ITEMS", 5)  # o índice sintético só tem 8 candidatos seguros
+    rec = _rec(_store_with_player(tmp_path, _played()), tmp_path)
+    r = rec.recommend(7, ["speed"], n=30)
+    n_safe = r["counts"]["sugestoes_seguras"]
+    assert n_safe >= core.MIN_SAFE_ITEMS and all(it["tier"] == "seguro" for it in r["items"])  # com o mínimo de seguras: só seguras
+    monkeypatch.setattr(core, "MIN_SAFE_ITEMS", 30)  # obriga a completar
+    r2 = _rec(_store_with_player(tmp_path / "b", _played()), tmp_path / "b").recommend(7, ["speed"], n=30)
+    tiers = [it["tier"] for it in r2["items"]]
+    k = tiers.count("seguro")
+    assert k == n_safe and "arriscado" in tiers and tiers == ["seguro"] * k + ["arriscado"] * (len(tiers) - k)  # seguras sempre primeiro
+    for it in r2["items"]:
+        if it["tier"] == "arriscado":
+            assert core.MIN_PASS_PROB_FALLBACK - 1e-6 <= it["p_pass"] < core.MIN_PASS_PROB and it["acc_pass"] >= core.MIN_EXPECTED_ACC and "menos de" in it["why"]
+    assert len({it["beatmap_id"] for it in r2["items"]}) == len(r2["items"])
+
+
+def test_the_passacc_predictor_applies_the_measured_calibration(tmp_path):
+    import json
+
+    import lightgbm as lgb
+
+    rng = np.random.default_rng(1)
+    x = rng.normal(size=(400, 3)).astype(np.float32)
+    for name, y in (("pass_model_A.txt", (x[:, 0] > 0).astype(float)), ("acc_pass_A.txt", 0.9 + 0.02 * x[:, 1])):
+        obj = "binary" if name.startswith("pass") else "regression"
+        b = lgb.train({"objective": obj, "verbose": -1, "num_leaves": 4}, lgb.Dataset(x, y), num_boost_round=5)
+        b.save_model(str(tmp_path / name))
+    raw = core.PassAccPredictor(tmp_path).predict_both(x)
+    assert np.allclose(raw["p_pass"], raw["p_pass_raw"]) and np.allclose(raw["acc"], raw["acc_raw"])  # sem ficheiro de calibração: igual ao bruto
+    (tmp_path / "calibration_pass_acc.json").write_text(json.dumps({"pass": {"a": 1.0, "b": 0.7}, "acc_shift": 0.03}), encoding="utf-8")
+    cal = core.PassAccPredictor(tmp_path).predict_both(x)
+    assert np.allclose(cal["p_pass_raw"], raw["p_pass_raw"]) and (cal["p_pass"] > cal["p_pass_raw"]).mean() > 0.6  # subestimava: sobe
+    assert np.allclose(cal["acc"], np.clip(cal["acc_raw"] + 0.03, 0, 1))
+    off = core.PassAccPredictor(tmp_path, calibration=False).predict_both(x)
+    assert np.allclose(off["p_pass"], off["p_pass_raw"])

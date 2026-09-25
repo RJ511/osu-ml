@@ -268,3 +268,55 @@ recommendation_feedback = Table(
     Column("score", Float),
     Column("created_at", DateTime, nullable=False),
 )
+
+# Mapas que o jogador não quer que lhe sejam recomendados (preferência; ver Recommender.block_map)
+recommendation_blocks = Table(
+    "recommendation_blocks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", BigInteger, nullable=False),
+    Column("scope", String(8), nullable=False),  # set (o mapa inteiro, todas as dificuldades) | diff (só esta dificuldade)
+    Column("beatmap_id", BigInteger),  # obrigatório se scope=diff; a dificuldade de onde se bloqueou (só informativo se scope=set)
+    Column("beatmapset_id", BigInteger),  # obrigatório se scope=set
+    Column("label", String(300)),
+    Column("note", String(300)),
+    Column("created_at", DateTime, nullable=False),
+)
+Index("ix_recommendation_blocks_user", recommendation_blocks.c.user_id)
+
+
+# Registo de previsões do recomendador e resultado real (ver recommend/log.py)
+prediction_log = Table(
+    "prediction_log",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", BigInteger, nullable=False),
+    Column("beatmap_id", BigInteger, nullable=False),
+    Column("kind", String(12), nullable=False),  # recomendacao | sombra
+    Column("model_fp", String(16)),
+    Column("created_at", DateTime, nullable=False),
+    Column("asof", DateTime),  # o perfil só usa passes anteriores a este instante
+    Column("skills", String(64)),
+    Column("tier", String(12)),
+    Column("p_pass", Float),
+    Column("acc_pass", Float),
+    Column("p_pass_raw", Float),
+    Column("acc_pass_raw", Float),
+    Column("challenge", Float),  # exigência máxima acima do nível do jogador (4 eixos)
+    Column("evaluated_at", DateTime),  # preenchido quando há resultado
+    Column("n_attempts", Integer),
+    Column("n_lazer_attempts", Integer),
+    Column("passed", Boolean),
+    Column("first_try_passed", Boolean),
+    Column("best_acc", Float),
+    Column("n_deaths_possible", Integer),
+    Column("n_restarts", Integer),
+)
+Index("ix_prediction_log_user_map", prediction_log.c.user_id, prediction_log.c.beatmap_id)
+
+shadow_state = Table(
+    "shadow_state",
+    metadata,
+    Column("user_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("last_seen_at", DateTime, nullable=False),  # jogadas com first_seen_at <= isto já foram avaliadas
+)

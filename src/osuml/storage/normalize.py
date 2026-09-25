@@ -60,6 +60,16 @@ def _float(v: Any) -> float | None:
         return None
 
 
+def effective_passed(s: dict[str, Any]) -> bool | None:
+    """`passed` fiável. A API devolve `passed: false` em scores **legacy** (do stable, com `legacy_score_id`) com rank A..XH: são passes (o stable só dá
+    rank S/A/B/C/D a quem completou o mapa). Medido: 3 002 scores de 31 jogadores estavam assim e entravam como falhas. Nos scores do lazer `passed` é fiável
+    (falhados têm rank F sem exceção)."""
+    p = s.get("passed")
+    if p is False and s.get("legacy_score_id") and (s.get("rank") or "F") != "F":
+        return True
+    return p
+
+
 def normalize_score(s: dict[str, Any]) -> dict[str, Any] | None:
     """Objeto Score (formato >= 20220705) -> colunas. None se não tiver id/user."""
     score_id = _int(s.get("id"))
@@ -73,7 +83,7 @@ def normalize_score(s: dict[str, Any]) -> dict[str, Any] | None:
         "beatmap_id": beatmap_id,
         "ruleset_id": _int(s.get("ruleset_id")),
         "legacy_score_id": _int(s.get("legacy_score_id")),
-        "passed": s.get("passed"),
+        "passed": effective_passed(s),
         "accuracy": _float(s.get("accuracy")),
         "total_score": _int(s.get("total_score")),
         "legacy_total_score": _int(s.get("legacy_total_score")),

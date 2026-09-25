@@ -196,3 +196,26 @@ def test_similarity_methods_beat_popularity_when_players_have_distinct_tastes(tm
     for m in ("content_profile", "user_cf", "item_cf", "hybrid_user_content"):
         assert r[m]["recall@50"] > r["popularity"]["recall@50"] + 0.05  # personalizar ganha à popularidade quando há gostos distintos
     assert (tmp_path / "out" / "v1" / "results.json").exists()
+
+
+def test_acc_model_predicts_the_accuracy_of_passes_and_saves_a_loadable_model(tmp_path):
+    """Mundo sintético: a accuracy dos passes depende da folga skill-dificuldade; o modelo tem de bater a mediana global."""
+    import lightgbm as lgb
+
+    from osuml.analysis.acc_model import band_table, reg_metrics, run_acc_model
+
+    rng = np.random.default_rng(5)
+    _world(tmp_path)
+    sc = pq.read_table(tmp_path / "in" / "dump_scores_2026_09_01_random_10000.parquet").to_pylist()
+    stars = {1000 + i: s for i, s in enumerate(np.linspace(2, 9, N_MAPS))}
+    for r in sc:  # accuracy sobe quando o mapa é mais fácil (menos estrelas) + ruído
+        r["accuracy"] = float(np.clip(1.02 - 0.05 * stars[r["beatmap_id"]] + rng.normal(0, 0.01), 0.7, 1.0))
+    pq.write_table(pa.Table.from_pylist(sc), tmp_path / "in" / "dump_scores_2026_09_01_random_10000.parquet")
+    out = run_acc_model(tmp_path / "in", tmp_path / "out", "t", rounds=60, threads=2, cap_rows=100)
+    assert out["data"]["passed_pairs"] > 500 and out["results"]["model"]["mae"] < out["results"]["baselines"]["global_median"]["mae"]
+    model = lgb.Booster(model_file=str(tmp_path / "out" / "t" / "acc_pass_A.txt"))
+    assert model.num_feature() == len(pm.FEATURE_SETS["A"]) and (tmp_path / "out" / "t" / "results.json").exists()
+    m = reg_metrics(np.array([0.9, 0.95]), np.array([0.92, 0.93]))
+    assert m["mae"] == pytest.approx(0.02) and m["bias"] == pytest.approx(0.0)
+    bands = band_table(np.full(100, 0.94), np.full(100, 0.91))
+    assert bands[0]["predicted_range"] == [0.90, 0.93] and bands[0]["share_actual_ge_88"] == 1.0 and bands[0]["share_actual_ge_93"] == 1.0

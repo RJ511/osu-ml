@@ -84,14 +84,14 @@ $("q").oninput=()=>{clearTimeout(timer);timer=setTimeout(search,200)};
 
 async function search(){
  const q=$("q").value,r=await post(mode==="p"?"/api/players":"/api/maps",{q});const list=$("list");
- $("count").textContent=r.total!=null?`${r.total.toLocaleString("pt-PT")} resultado(s)${r.items.length<r.total?` · a mostrar ${r.items.length}`:""}`:"";
+ $("count").textContent=r.total!=null?`${r.total.toLocaleString("pt-PT")} resultado(s)${r.items.length<r.total?` · a mostrar ${r.items.length}`:""}${mode==="m"&&r.catalog?` · catálogo de ${r.catalog_size.toLocaleString("pt-PT")} mapas (jogados primeiro)`:""}`:"";
  if(!r.items.length){list.replaceChildren(el("div","empty","Sem resultados."));return}
  list.replaceChildren(...r.items.map(it=>{
   const id=mode==="p"?it.user_id:it.beatmap_id,row=el("div","row"+((mode==="p"?selP:selM)===id?" sel":""));row.dataset.id=id;
   if(mode==="p"){row.appendChild(el("div","n",it.username));
    const s=el("div","sub",`${it.pp!=null?n0(it.pp)+"pp":"pp ?"} · rank ${it.global_rank!=null?"#"+n0(it.global_rank):"?"} · ${it.n_scores} plays · verificado ${ago(it.last_check_at)} `);
    AX.slice(0,4).forEach(([k])=>{const g=it.grades[k];const c=el("span","g "+gc(g),g||"–");if(!it.confident)c.style.opacity=".5";s.appendChild(c)});row.appendChild(s)}
-  else{row.appendChild(el("div","n",it.label));row.appendChild(el("div","sub",`${n2(it.stars)}★ · ${it.n_plays} plays · ${it.n_players} jogador(es)${it.max_pp?" · máx "+n0(it.max_pp)+"pp":""} · ${it.status||""}`))}
+  else{row.appendChild(el("div","n",it.label));row.appendChild(el("div","sub",it.catalog_only?`${n2(it.stars)}★ · só no catálogo (sem plays acompanhados)`:`${n2(it.stars)}★ · ${it.n_plays} plays · ${it.n_players} jogador(es)${it.max_pp?" · máx "+n0(it.max_pp)+"pp":""} · ${it.status||""}`))}
   row.onclick=()=>show(mode,id);return row}))}
 
 async function show(m,id){
@@ -152,7 +152,7 @@ const AXL=[["aim","Aim"],["speed","Speed"],["stamina","Stamina"],["reading","Rea
 const KIND={novo:"novo",rejogar:"rejogar",tentar_de_novo:"tentar de novo"};
 function recCard(uid){
  const box=el("div","card2"),head=el("div");head.appendChild(el("b","","Recomendar mapas"));
- box.appendChild(head);box.appendChild(el("div","sub","Escolhe a(s) skill(s) que queres melhorar. O resto é automático: mapas alcançáveis (≥ 88 % de accuracy) que te desafiem nessas skills, do estilo de jogadores parecidos; mapas já jogados voltam se a accuracy/pp prevista for bastante superior à atual."));
+ box.appendChild(head);box.appendChild(el("div","sub","Escolhe a(s) skill(s) que queres melhorar. O resto é automático: mapas com accuracy esperada ≥ 88 % (ideal ~93 %) que te desafiem nessas skills, do estilo de jogadores parecidos; mapas já jogados voltam se a accuracy/pp prevista for bastante superior à atual."));
  const row=el("div","tools"),sel=new Set();
  AXL.forEach(([k,l])=>{const b=el("button","",l);b.onclick=()=>{if(sel.has(k)){sel.delete(k);b.classList.remove("on")}else{sel.add(k);b.classList.add("on")}};row.appendChild(b)});
  const go=el("button","go","Recomendar"),msg=el("span","sub");row.append(go,msg);box.appendChild(row);
@@ -165,9 +165,9 @@ function recCard(uid){
   const lv=r.player.levels;out.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
   const cols=[{h:"#",sort:x=>x.rank,render:x=>String(x.rank)},
    {h:"Mapa",sort:x=>x.label.toLowerCase(),num:false,cls:"wrap",render:x=>{const a=el("a","lk",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";const w=el("span");w.appendChild(a);w.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));return w}},
-   {h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
+   {h:"Nível",sort:x=>x.tier,num:false,render:x=>x.tier==="seguro"?"seguro":"arriscado"},{h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
    {h:"Desafio",sort:x=>x.delta[r.skills[0]],render:x=>r.skills.map(a=>a+" "+(x.delta[a]>=0?"+":"")+x.delta[a].toFixed(1)).join(" · ")},
-   {h:"≥88 %",sort:x=>x.p88,render:x=>Math.round(x.p88*100)+" %"},{h:"Acc prov.",sort:x=>x.acc_pred,render:x=>(x.acc_pred*100).toFixed(1)+" %"},
+   {h:"P(passar)",sort:x=>x.p_pass,render:x=>Math.round(x.p_pass*100)+" %"},{h:"Acc se passar",sort:x=>x.acc_pass,render:x=>(x.acc_pass*100).toFixed(1)+" %"},
    {h:"Acc atual",sort:x=>x.acc_cur,render:x=>x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"},
    {h:"pp est.",sort:x=>x.pp_gain_pct,render:x=>x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"},
    {h:"Estilo",sort:x=>x.style_pct,render:x=>x.style_pct.toFixed(0)},
@@ -176,19 +176,36 @@ function recCard(uid){
      const y=el("button","","Serve"),n=el("button","","Não serve");
      y.onclick=async()=>{await post("/api/rec_feedback",{id:uid,beatmap_id:x.beatmap_id,verdict:"serve",skills:r.skills,kind:x.kind,score:x.score});done("obrigado: serve")};
      n.onclick=async()=>{await post("/api/rec_feedback",{id:uid,beatmap_id:x.beatmap_id,verdict:"nao_serve",skills:r.skills,kind:x.kind,score:x.score});done("obrigado: não serve")};
-     w.append(y,n);return w}}];
+     const blk=async scope=>{const res=await post("/api/rec_block",{id:uid,beatmap_id:x.beatmap_id,beatmapset_id:x.beatmapset_id,scope});
+      done(res.error?res.error:scope==="set"?"mapa bloqueado (não volta a ser recomendado)":"dificuldade bloqueada");if(!res.error)loadBlocks()};
+     const b1=el("button","","Não recomendar o mapa"),b2=el("button","","só esta dificuldade");b1.onclick=()=>blk("set");b2.onclick=()=>blk("diff");
+     w.append(y,n,el("br"),b1,b2);return w}}];
   r.items.forEach((x,i)=>x.rank=i+1);
   out.appendChild(sortable(cols,r.items,0,1));
   (r.notes||[]).forEach(t=>out.appendChild(el("div","sub","· "+t)))};
+ const bl=el("div"),blkin=el("input"),bs=el("button","","Bloquear o mapa inteiro"),bd=el("button","","Só esta dificuldade"),bm=el("span","sub"),blist=el("div");
+ blkin.placeholder="Link ou ID do mapa a não receber";blkin.style.minWidth="280px";
+ bl.appendChild(el("div","sub","Mapas que não queres receber (preferência tua; podes bloquear na tabela acima ou colar aqui um link/ID):"));
+ const brow=el("div","tools");brow.append(blkin,bs,bd,bm);bl.append(brow,blist);box.appendChild(bl);
+ async function loadBlocks(){const r=await post("/api/rec_blocks",{id:uid});if(r.error){blist.replaceChildren(el("div","sub",r.error));return}
+  if(!r.items.length){blist.replaceChildren(el("div","sub","Nenhum mapa bloqueado."));return}
+  blist.replaceChildren(...r.items.map(b=>{const d=el("div","sub"),a=el("a","lk",b.label||("mapa "+(b.beatmapset_id||b.beatmap_id)));a.href=b.url;a.target="_blank";a.rel="noopener noreferrer";
+   const u=el("button","","Desbloquear");u.style.marginLeft="8px";u.onclick=async()=>{await post("/api/rec_unblock",{id:uid,block_id:b.id});loadBlocks()};
+   d.append(a,document.createTextNode(" · "+(b.scope==="set"?"mapa inteiro":"só esta dificuldade")+(b.beatmap_id?" · ID "+b.beatmap_id:"")),u);return d}))}
+ const doRef=async scope=>{const ref=blkin.value.trim();if(!ref){bm.textContent="cola um link ou um ID";return}
+  const r=await post("/api/rec_block",{id:uid,ref,scope});bm.textContent=r.error||(r.already?"já estava bloqueado: ":"bloqueado: ")+(r.label||"");if(!r.error)blkin.value="";loadBlocks()};
+ bs.onclick=()=>doRef("set");bd.onclick=()=>doRef("diff");loadBlocks();
  return box}
 
 function renderMap(r){
  const out=[],h=el("div");h.appendChild(el("p","big",r.label));
- h.appendChild(el("div","sub",`#${r.beatmap_id}${r.creator?" · mapper "+r.creator:""} · ${r.status||""} · ${n2(r.difficulty_rating)}★ (API, sem mods)${r.has_file?"":" · sem ficheiro .osu"}`));out.push(h);
+ h.appendChild(el("div","sub",`#${r.beatmap_id}${r.creator?" · mapper "+r.creator:""} · ${r.status||""} · ${n2(r.difficulty_rating)}★ (sem mods)${r.has_file?"":" · sem ficheiro .osu"}`));
+ if(r.url){const a=el("a","lk","Abrir no osu!");a.href=r.url;a.target="_blank";a.rel="noopener noreferrer";h.appendChild(a)}
+ if(r.note)h.appendChild(el("div","sub",r.note));out.push(h);
  out.push(el("h2","","Atributos por mods"));
  if(!r.variants.length)out.push(el("div","empty","Ainda não categorizado."));
  else{const cols=[{h:"Mods",sort:x=>x.mods,num:false,render:x=>x.mods||"NM"},
-  {h:"★",sort:x=>x.axes&&x.axes.stars?x.axes.stars.score:null,render:x=>x.status!=="ok"?el("span","dim",x.status+(x.error?" · "+x.error:"")):axCell(x.axes.stars)}];
+  {h:"★",sort:x=>x.axes&&x.axes.stars?x.axes.stars.score:null,render:x=>x.status!=="ok"?el("span","dim",x.status+(x.error?" · "+x.error:"")):axCell(x.axes&&x.axes.stars)}];
   AX.slice(0,4).forEach(([k,l])=>cols.push({h:l,sort:x=>x.axes&&x.axes[k]?x.axes[k].score:null,render:x=>axCell(x.axes&&x.axes[k])}));
   const rw=(k,f)=>x=>x.raw&&x.raw[k]!=null?f(x.raw[k]):"—";
   cols.push({h:"★ real",sort:x=>x.raw&&x.raw.stars,render:rw("stars",n2)},{h:"aim",sort:x=>x.raw&&x.raw.aim,render:rw("aim",n2)},{h:"speed",sort:x=>x.raw&&x.raw.speed,render:rw("speed",n2)},
@@ -257,9 +274,40 @@ def actions(explorer: Explorer, checker: Any | None = None, recommender: Any | N
             score = None
         return recommender.feedback(uid, bid, str(body.get("verdict") or ""), [str(x) for x in skills], str(body.get("kind") or ""), score)
 
+    def rec_block(body: dict) -> dict:
+        from ..recommend.core import parse_map_ref
+
+        uid = _int(body)
+        if uid is None or recommender is None:
+            return {"error": "pedido inválido"}
+        bid = sid = None
+        if body.get("ref"):
+            bid, sid = parse_map_ref(body.get("ref"))
+            if bid is None and sid is None:
+                return {"error": "não percebi o mapa: cola um link do osu! ou o ID"}
+        else:
+            bid = _int(body, "beatmap_id")
+            sid = _int(body, "beatmapset_id")
+        return recommender.block_map(uid, beatmap_id=bid, beatmapset_id=sid or None, scope=str(body.get("scope") or "set"))
+
+    def rec_unblock(body: dict) -> dict:
+        uid, bid = _int(body), _int(body, "block_id")
+        if uid is None or bid is None or recommender is None:
+            return {"error": "pedido inválido"}
+        return recommender.unblock(uid, bid)
+
+    def rec_blocks(body: dict) -> dict:
+        uid = _int(body)
+        if uid is None or recommender is None:
+            return {"error": "pedido inválido"}
+        return {"items": recommender.blocks(uid)}
+
     return {
         "/api/recommend": recommend,
         "/api/rec_feedback": rec_feedback,
+        "/api/rec_block": rec_block,
+        "/api/rec_unblock": rec_unblock,
+        "/api/rec_blocks": rec_blocks,
         "/api/check": check,
         "/api/players": lambda body: explorer.search_players(str(body.get("q") or "")),
         "/api/maps": lambda body: explorer.search_maps(str(body.get("q") or "")),
