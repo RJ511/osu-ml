@@ -398,6 +398,18 @@ def _recommend_tools(args: argparse.Namespace, settings: Settings) -> int:
                          training_results=[Path(f) for f in args.training_results] if args.training_results else None)
         print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
         return 0
+    if step == "recalibrate":
+        from .recommend.adjust import recalibrate, refresh_adjustments
+
+        models = Path(args.models_dir) if args.models_dir else settings.processed_dir / "recommend" / "models"
+        store = _store(settings)
+        out = recalibrate(store, models, apply=args.apply)
+        if args.apply:
+            out["player_adjust"] = refresh_adjustments(store, models)  # depois da calibração global nova, os ajustes por jogador recalculam-se sobre ela
+        print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+        if not args.apply:
+            print("\n(simulação: nada foi alterado; junta --apply para gravar, o que só acontece se a validação cruzada melhorar)")
+        return 0
     if step == "upload":
         from .storage.s3 import upload_pack
 
@@ -611,6 +623,9 @@ def cmd_poll(args: argparse.Namespace, settings: Settings) -> int:
             rec = _eval_recommender(settings, store)
             if rec.ready()[0]:
                 log_line({"eval": evaluate_pending(store, rec)})
+                from .recommend.adjust import refresh_adjustments
+
+                log_line({"adjust": refresh_adjustments(store, rec.models_dir)})  # correção por jogador com as jogadas novas (barato, 0 pedidos)
         except Exception as exc:  # noqa: BLE001
             log_line({"eval_error": f"{type(exc).__name__}: {exc}"})
     print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
@@ -639,6 +654,9 @@ def cmd_eval_log(args: argparse.Namespace, settings: Settings) -> int:
             print(why, file=sys.stderr)
             return 1
         print(json.dumps(evaluate_pending(store, rec, since=since, batch=args.batch), ensure_ascii=False))
+        from .recommend.adjust import refresh_adjustments
+
+        print(json.dumps({"player_adjust": refresh_adjustments(store, rec.models_dir)}, ensure_ascii=False))
     print(json.dumps(report(store, since=since), indent=2, ensure_ascii=False, default=str))
     return 0
 
@@ -890,6 +908,9 @@ def main(argv: list[str] | None = None) -> int:
             a.add_argument("--beatmap", type=int, required=True)
             a.add_argument("--verdict", choices=["serve", "nao_serve"], required=True)
             a.add_argument("--note", default="")
+    rcal = rsub.add_parser("recalibrate", help="recalibra a probabilidade/accuracy com o registo de previsões (0 pedidos) e atualiza a correção por jogador; simulação sem --apply")
+    rcal.add_argument("--apply", action="store_true", help="grava a nova calibração (só se melhorar em validação cruzada; guarda cópia da anterior)")
+    rcal.add_argument("--models-dir", default=None)
     up = rsub.add_parser("upload", help="envia o pacote (.zip) para o bucket S3 privado (só quando pedido; credenciais do boto3)")
     up.add_argument("--zip", default="dist/osuml-pack.zip")
     up.add_argument("--key", default=None, help="chave no bucket (omissão: recommend/<nome do zip>)")

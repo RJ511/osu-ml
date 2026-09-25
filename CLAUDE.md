@@ -713,7 +713,18 @@ jogadores únicos** nos scores aleatórios + 10 000 do top. `top_10000` = 56,6 M
   grava cada recomendação (com o modelo) e faz **avaliação-sombra** de QUALQUER mapa jogado (perfil só até ao início das jogadas novas); resultado por par = tentativas, passou, 1.ª tentativa, melhor accuracy, reinícios/mortes.
   Histórico desde 01/09 (3 843 pares, 73 jogadores; lazer n=1 786): P(passar) previsto 0,72 vs observado **0,68** (1.ª tentativa 0,62; previsto 0,75 → 0,68, 0,85 → 0,82, 0,94 → 0,89: ligeiramente optimista); **tentativas do lazer (3 065): 43 % passes,
   33 % reinícios certos, ≤ 23 % mortes possíveis** (por tentativa "não morrer" ≥ 77 %); accuracy ao passar viés **+1,6 pts**, MAE 4,2, **sem dependência da exigência** (1,5 / 1,7 / 1,8); viés por jogador varia de −0,6 a +5,1 pts (NBAH +5,1, LemonBread741 +4,8,
-  Skinny_Ferny −0,6) ⇒ vale a pena uma **correção por jogador** (encolhimento `n/(n+20)`, já calculado no relatório, ainda não aplicada) e **recalibração periódica** em vez de re-treino constante (re-treino só com dumps novos).
+  Skinny_Ferny −0,6) ⇒ vale a pena uma **correção por jogador** (**já aplicada**, ver abaixo) e **recalibração periódica** em vez de re-treino constante (re-treino só com dumps novos).
+- **Correção por jogador + recalibração (2026-09-25)** (`recommend/adjust.py`; `osuml recommend recalibrate [--apply]`): `models/player_adjust.json` (por jogador: `acc_bias` encolhido `Σd/(n+10)`, `pass_offset` no logit `Σ(y−p)/(Σp(1−p)+1/τ²)`, τ=0,5; só com
+  ≥ 5 / ≥ 10 pares; estima-se **só** com as avaliações-sombra, a partir dos valores BRUTOS + a calibração global atual, para não ser circular; o registo das recomendações grava os valores do MODELO, antes da correção). Aplica-se em `Recommender.recommend` (relê o ficheiro se mudou:
+  o `poll` é outro processo e atualiza-o no fim de cada avaliação, e o `eval-log` também). **Validação fora do tempo** (cada previsão só com o passado do jogador; 3 843 pares): MAE da accuracy 4,37 → 4,07 pts (K=10; 4,01 se encolher para o viés global), Brier de P(passar) 0,195 → 0,183
+  (τ=0,5). Efeito real: PXD Vieira acc −1,8 pts e P(passar) −0,49 no logit ⇒ a lista "segura" muda por completo (0/20 em comum); gaaGOD −0,2 pts / −0,16 (11/20 em comum). O pacote leva o `player_adjust.json` só dos jogadores do pacote (**o pacote S3 `passacc3` ainda não o tem: refazer e
+  reenviar quando se quiser**). **`recalibrate`** refaz a calibração global (Platt + deslocamento da accuracy) com o registo (só lazer; ≥ 500 pares e ≥ 30 jogadores) e só grava com `--apply` **e** se a validação cruzada por jogador melhorar (Brier ≥ 0,002 / MAE ≥ 0,0005; guarda `.bak-<data>`).
+  Hoje (1 786 pares lazer, 48 jogadores) NÃO compensa: Brier 0,1815 → 0,1801 (ECE 0,058 → 0,028) ⇒ nada foi alterado. Cadência sugerida: correr o `recalibrate` (simulação) ~1×/mês; re-treinar o modelo só com dumps novos.
+- **Mapas bloqueados** (`recommendation_blocks`; `Recommender.block_map/unblock/blocks`, `parse_map_ref`): preferência do jogador de NÃO receber um mapa — `set` (omissão: o mapa inteiro, todas as dificuldades, via `set_id` do índice) ou `diff` (só essa dificuldade; também quando o set é desconhecido, ~21 mil mapas sem `set_id`). Por jogador, sem duplicados,
+  aplicado na elegibilidade (também conta em `player.n_blocked`), independente do "Não serve" (que só regista). Cada (des)bloqueio acrescenta uma linha ao TSV de feedback (`bloquear_mapa`/`bloquear_dificuldade`/`desbloquear`). UI: botões "Não recomendar o mapa" / "só esta dificuldade" em cada sugestão + campo para colar link/ID + lista com "Desbloquear",
+  na app autónoma (8770) e no Explorar (8765) (`/api/block|unblock|blocks`, `/api/rec_block|rec_unblock|rec_blocks`). Aceita links `beatmapsets/<set>#osu/<id>`, `/beatmaps/<id>`, `/b/<id>` e IDs soltos (ID solto = dificuldade).
+- **Explorar → mapas do catálogo** (2026-09-25): a lista de mapas só mostrava os **8 493** mapas com plays dos 75 jogadores da API (a BD só guarda metadados desses). O Explorar usa agora também o índice do recomendador (`Recommender.catalog()`, sem carregar modelos): **152 721 mapas** (152 268 do catálogo + 453 só da BD); pesquisa por texto/id de mapa/id de set
+  (os que têm plays acompanhados vêm primeiro, `catalog_only` para os restantes) e ficha com atributos reais por mods do `catalog/v2/map_attributes.parquet` (notas 0-100 só sem mods; sem plays). ~0,8 s por pesquisa.
   Pacote atual: `…0e69cefab468-passacc3.zip` (dados corrigidos; substitui `passacc2`).
   falhar — sai com P(passar) 81 %); melhor passe do par é ligeiramente optimista face a uma jogada avulsa. Pod `9s66ow1w5hs1si` (criado porque o `1v…` já não arranca por falta de memória no servidor) **parado**.
 - **Índice v2** (`data/processed/recommend/index/`, antigo em `index_old25`; modelos antigos em `models_old25`): 152 268 mapas, matriz CF com 34 802 jogadores
@@ -769,7 +780,7 @@ Tabelas: `runs`, `api_requests`, `users`, `scores` (PK `score_id`), `score_obser
 
 ## Convenções
 
-- Correr `pytest` antes de dar uma alteração por concluída (196 testes, 1 só corre em Linux; todos devem passar).
+- Correr `pytest` antes de dar uma alteração por concluída (211 testes, 1 só corre em Linux; todos devem passar).
   Testes nunca fazem pedidos reais: usar `httpx.MockTransport`.
 - **Nunca apagar `data/raw/`**. Respostas raw são gravadas antes de normalizar.
 - Datas guardadas em UTC *naive*.

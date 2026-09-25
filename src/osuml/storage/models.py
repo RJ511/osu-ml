@@ -269,6 +269,21 @@ recommendation_feedback = Table(
     Column("created_at", DateTime, nullable=False),
 )
 
+# Mapas que o jogador não quer que lhe sejam recomendados (preferência; ver Recommender.block_map)
+recommendation_blocks = Table(
+    "recommendation_blocks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", BigInteger, nullable=False),
+    Column("scope", String(8), nullable=False),  # set (o mapa inteiro, todas as dificuldades) | diff (só esta dificuldade)
+    Column("beatmap_id", BigInteger),  # obrigatório se scope=diff; a dificuldade de onde se bloqueou (só informativo se scope=set)
+    Column("beatmapset_id", BigInteger),  # obrigatório se scope=set
+    Column("label", String(300)),
+    Column("note", String(300)),
+    Column("created_at", DateTime, nullable=False),
+)
+Index("ix_recommendation_blocks_user", recommendation_blocks.c.user_id)
+
 
 # Registo de previsões do recomendador e resultado real (ver recommend/log.py)
 prediction_log = Table(

@@ -72,7 +72,11 @@ def make_dashboard(collect_ctrl: Any, categorize_ctrl: Any | None, port: int, ch
         from ..explore.server import PAGE as EXPLORE_PAGE
         from ..explore.server import actions as explore_actions
 
-        explorer = Explorer(categorize_ctrl.store)
+        attrs = None
+        if recommender is not None:
+            cand = recommender.index_dir.parents[1] / "catalog" / "v2" / "map_attributes.parquet"
+            attrs = cand if cand.exists() else None
+        explorer = Explorer(categorize_ctrl.store, catalog=recommender.catalog if recommender is not None else None, attributes=attrs)
         checker = checker_factory(explorer) if checker_factory is not None else None
         sections["explore"] = (EXPLORE_PAGE, lambda: {"ok": True}, explore_actions(explorer, checker, recommender))
 

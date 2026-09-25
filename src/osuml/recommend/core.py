@@ -30,6 +30,20 @@ def beatmap_url(beatmap_id: int, set_id: int | None = None) -> str:
     if set_id:
         return f"https://osu.ppy.sh/beatmapsets/{int(set_id)}#osu/{int(beatmap_id)}"
     return f"https://osu.ppy.sh/beatmaps/{int(beatmap_id)}"
+def parse_map_ref(text: Any) -> tuple[int | None, int | None]:
+    """(beatmap_id, beatmapset_id) a partir de um link do osu! ou de um número (número solto = id da dificuldade). (None, None) se não reconhecer."""
+    import re
+
+    t = str(text or "").strip()
+    m = re.search(r"beatmapsets/(\d+)(?:#\w+/(\d+))?", t)
+    if m:
+        return (int(m.group(2)) if m.group(2) else None), int(m.group(1))
+    m = re.search(r"/(?:beatmaps|b)/(\d+)", t)
+    if m:
+        return int(m.group(1)), None
+    return (int(t), None) if t.isdigit() else (None, None)
+
+
 THRESHOLDS = (0.85, 0.88, 0.90, 0.93, 0.95, 0.97)
 ACC_PP_CURVE = ((0.80, 0.408), (0.85, 0.456), (0.88, 0.492), (0.90, 0.524), (0.93, 0.589), (0.95, 0.652), (0.97, 0.746),
                 (0.98, 0.81), (0.99, 0.893), (1.0, 1.0))  # pp(acc)/pp(100 %), mediana em 150 mapas (rosu-pp)
@@ -178,6 +192,7 @@ class Recommender:
         self._predictor, self._index, self._cf = predictor, index, cf
         self._lock = threading.Lock()
         self._cache: dict[int, tuple[float, Any, Any]] = {}
+        self._adjust: dict[int, dict[str, Any]] | None = None  # correção por jogador (recommend/adjust.py), lida de models/player_adjust.json
 
     # ------------------------------------------------------------------ carga
     def ready(self) -> tuple[bool, str]:
@@ -189,21 +204,38 @@ class Recommender:
             return False, "faltam modelos em models/ (pass_model_A.txt e acc_pass_A.txt): osuml analyze pass-model / acc-model"
         return True, ""
 
+    def _load_index_unlocked(self) -> None:
+        import numpy as np
+
+        if self._index is not None:
+            return
+        z = np.load(self.index_dir / "index.npz")
+        labels = {}
+        lf = self.index_dir / "labels.parquet"
+        if lf.exists():
+            import pyarrow.parquet as pq
+
+            t = pq.read_table(lf).to_pydict()
+            labels = {int(b): {"artist": a, "title": ti, "version": v, "creator": c, "set_id": s}
+                      for b, a, ti, v, c, s in zip(t["beatmap_id"], t["artist"], t["title"], t["version"], t["creator"], t["set_id"])}
+        set_ids = np.array([int(labels.get(int(b), {}).get("set_id") or 0) for b in z["ids"]], dtype=np.int64) if labels else np.zeros(len(z["ids"]), dtype=np.int64)
+        self._index = {"ids": z["ids"], "x": z["x"], "axis": z["axis"], "labels": labels, "set_ids": set_ids}
+
+    def catalog(self) -> dict[str, Any] | None:
+        """Só o índice de mapas (ids, atributos, notas por eixo, nomes), sem carregar modelos nem a matriz de jogadores parecidos: é o que o Explorar usa para
+        pesquisar TODOS os mapas do catálogo, e não só os que os jogadores acompanhados jogaram. None se não houver índice."""
+        if self._index is None and not (self.index_dir / "index.npz").exists():
+            return None
+        with self._lock:
+            self._load_index_unlocked()
+        self._set_ids()
+        return self._index
+
     def _load(self) -> None:
         import numpy as np
 
         with self._lock:
-            if self._index is None:
-                z = np.load(self.index_dir / "index.npz")
-                labels = {}
-                lf = self.index_dir / "labels.parquet"
-                if lf.exists():
-                    import pyarrow.parquet as pq
-
-                    t = pq.read_table(lf).to_pydict()
-                    labels = {int(b): {"artist": a, "title": ti, "version": v, "creator": c, "set_id": s}
-                              for b, a, ti, v, c, s in zip(t["beatmap_id"], t["artist"], t["title"], t["version"], t["creator"], t["set_id"])}
-                self._index = {"ids": z["ids"], "x": z["x"], "axis": z["axis"], "labels": labels}
+            self._load_index_unlocked()
             if self._cf is None:
                 cfm, cfu = self.index_dir / "cf_matrix.npz", self.index_dir / "cf_users.npy"
                 if cfm.exists() and cfu.exists():
@@ -214,6 +246,27 @@ class Recommender:
                     self._cf = (None, None)
             if self._predictor is None:
                 self._predictor = PassAccPredictor(self.models_dir)
+            if self._adjust is None:
+                self.reload_adjustments()
+
+    def reload_adjustments(self) -> int:
+        """Relê `player_adjust.json` (o `poll`, que é outro processo, atualiza-o depois de cada avaliação)."""
+        from .adjust import ADJUST_FILE, load_adjustments
+
+        f = self.models_dir / ADJUST_FILE
+        self._adjust_mtime = f.stat().st_mtime if f.exists() else None
+        self._adjust = load_adjustments(self.models_dir)
+        return len(self._adjust)
+
+    def _adjustment(self, user_id: int) -> dict[str, Any] | None:
+        """Correção do jogador; relê o ficheiro se mudou desde a última leitura."""
+        from .adjust import ADJUST_FILE
+
+        f = self.models_dir / ADJUST_FILE
+        mt = f.stat().st_mtime if f.exists() else None
+        if self._adjust is None or mt != getattr(self, "_adjust_mtime", None):
+            self.reload_adjustments()
+        return (self._adjust or {}).get(user_id)
 
     # ---------------------------------------------------------------- jogador
     def load_player(self, user_id: int, as_of=None) -> PlayerData:
@@ -374,7 +427,13 @@ class Recommender:
         if pr is None:
             pr = self._predict_all(pdata, np.nonzero(cand)[0])
             self._cache = {key: pr}
-        p_pass, acc, p_raw, acc_raw = pr["p_pass"], pr["acc"], pr["p_pass_raw"], pr["acc_raw"]
+        p_raw, acc_raw = pr["p_pass_raw"], pr["acc_raw"]
+        p_model, acc_model = pr["p_pass"], pr["acc"]  # modelo + calibração global (é isto que fica no registo: o ajuste por jogador estima-se a partir dos valores brutos)
+        from .adjust import apply_adjustment
+
+        adj = self._adjustment(user_id)
+        p_pass, acc = apply_adjustment(p_model, acc_model, adj)  # correção por jogador (encolhida para 0 com poucos dados)
+        blocked = self._blocked_mask(user_id)
         gain_acc = np.where(passed_mask, acc - acc_cur, 0.0)
         gain_pp = np.where(passed_mask, (pp_factor(acc) / np.maximum(pp_factor(np.nan_to_num(acc_cur, nan=0.85)), 1e-6) - 1) * 100, 0.0)
         gain_norm = np.clip(gain_pp / 40.0, 0.0, 1.0)
@@ -383,7 +442,7 @@ class Recommender:
         taken: set[int] = set()
 
         def eligible(min_p):
-            ok = (p_pass >= min_p) & (acc >= MIN_EXPECTED_ACC)
+            ok = (p_pass >= min_p) & (acc >= MIN_EXPECTED_ACC) & ~blocked
             new_ok = ~played_mask & ok & (sel_delta >= MIN_DELTA_NEW) & (other_excess <= OTHER_AXIS_LIMIT)
             retry_ok = played_mask & ~passed_mask & ok & (sel_delta >= MIN_DELTA_NEW) & (other_excess <= OTHER_AXIS_LIMIT)
             replay_ok = (passed_mask & ok & (gain_acc >= MIN_ACC_GAIN) & (gain_pp >= MIN_PP_GAIN_PCT) & (sel_delta >= MIN_DELTA_REPLAY)
@@ -411,6 +470,7 @@ class Recommender:
                 kind = "rejogar" if replay_ok[j] else ("tentar_de_novo" if retry_ok[j] else "novo")
                 it = self._item(int(j), kind, lab, idx, score, p_pass, acc, p_raw, acc_raw, acc_cur, gain_acc, gain_pp, sel_delta, delta, style, pdata, skills)
                 it["tier"] = tier
+                it["p_pass_model"], it["acc_pass_model"] = round(float(p_model[j]), 3), round(float(acc_model[j]), 4)
                 if tier == "arriscado":
                     it["why"] += f"; P(passar) abaixo de {MIN_PASS_PROB * 100:.0f} %: só aparece porque havia menos de {MIN_SAFE_ITEMS} sugestões com {MIN_PASS_PROB * 100:.0f} %"
                 out.append(it)
@@ -429,11 +489,16 @@ class Recommender:
                 log_recommendations(self.store, user_id, items, skills, self.model_info().get("fingerprint"))
             except Exception:  # o registo nunca pode impedir uma recomendação
                 pass
+        notes_adj = ([f"correção por jogador (medida nas tuas jogadas anteriores): accuracy {-float(adj.get('acc_bias') or 0.0) * 100:+.1f} pontos, "
+                      f"P(passar) {float(adj.get('pass_offset') or 0.0):+.2f} no logit"] if adj else [])
         return {"player": {"user_id": user_id, "username": pdata.username, "levels": {a: round(v, 1) for a, v in pdata.levels.items()},
-                           "n_passes_used": pdata.n_passes, "n_played_maps": len(pdata.played)},
+                           "n_passes_used": pdata.n_passes, "n_played_maps": len(pdata.played),
+                           "adjust": None if not adj else {"acc_bias_pts": round(float(adj.get("acc_bias") or 0.0) * 100, 2), "pass_offset": adj.get("pass_offset"),
+                                                           "n_acc": adj.get("n_acc"), "n_pass": adj.get("n_pass")},
+                           "n_blocked": int(blocked.sum())},
                 "skills": skills, "items": items,
                 "counts": {"novo": int(new_ok.sum()), "tentar_de_novo": int(retry_ok.sum()), "rejogar": int(replay_ok.sum()), "sugestoes_seguras": n_safe},
-                "notes": [*pdata.notes, "Atributos dos mapas sem mods; previsão com o perfil de forma atual do jogador (não a forma de hoje, nem mods).",
+                "notes": [*pdata.notes, *notes_adj, "Atributos dos mapas sem mods; previsão com o perfil de forma atual do jogador (não a forma de hoje, nem mods).",
                           "Nível = P90 dos melhores passes; nota 50 = mapa mediano, +20 por desvio-padrão.",
                           f"Regra: P(passar) ≥ {MIN_PASS_PROB * 100:.0f} % e accuracy esperada ao passar ≥ {MIN_EXPECTED_ACC * 100:.0f} % (ideal ~{TARGET_ACC * 100:.0f} %). "
                           "'arriscado' = P(passar) entre 70 % e 80 %."]}
@@ -465,6 +530,124 @@ class Recommender:
                 "acc_cur": None if np.isnan(acc_cur[j]) else round(float(acc_cur[j]), 4),
                 "pp_gain_pct": round(float(gain_pp[j]), 1) if kind == "rejogar" else None,
                 "style_pct": round(float(style[j]) * 100, 1), "score": round(float(score[j]), 4), "why": "; ".join(parts)}
+
+    # -------------------------------------------------------------- bloqueios
+    def _blocked_mask(self, user_id: int):
+        """Máscara (n_mapas,) dos mapas que este jogador pediu para não receber: `set` = todas as dificuldades do mapa, `diff` = só essa dificuldade."""
+        import numpy as np
+        from sqlalchemy import select
+
+        from ..storage import models as m
+
+        ids, set_ids = self._index["ids"], self._set_ids()
+        mask = np.zeros(len(ids), dtype=bool)
+        with self.store.engine.connect() as c:
+            rows = c.execute(select(m.recommendation_blocks.c.scope, m.recommendation_blocks.c.beatmap_id, m.recommendation_blocks.c.beatmapset_id)
+                             .where(m.recommendation_blocks.c.user_id == user_id)).all()
+        bsets = {int(sid) for scope, _, sid in rows if scope == "set" and sid}
+        bdiffs = {int(b) for scope, b, _ in rows if scope == "diff" and b}
+        if bsets:
+            mask |= np.isin(set_ids, list(bsets)) & (set_ids > 0)
+        if bdiffs:
+            mask |= np.isin(ids, list(bdiffs))
+        return mask
+
+    def _set_ids(self):
+        """(n_mapas,) id do set de cada mapa do índice (0 se desconhecido); calculado uma vez."""
+        import numpy as np
+
+        idx = self._index
+        if idx.get("set_ids") is None or len(idx["set_ids"]) != len(idx["ids"]):
+            idx["set_ids"] = np.array([int((idx["labels"].get(int(b)) or {}).get("set_id") or 0) for b in idx["ids"]], dtype=np.int64)
+        return idx["set_ids"]
+
+    def _set_of(self, beatmap_id: int) -> int | None:
+        sid = (self._index["labels"].get(int(beatmap_id)) or {}).get("set_id")
+        if sid:
+            return int(sid)
+        from sqlalchemy import select
+
+        from ..storage import models as m
+
+        with self.store.engine.connect() as c:
+            v = c.execute(select(m.beatmaps.c.beatmapset_id).where(m.beatmaps.c.beatmap_id == int(beatmap_id))).scalar()
+        return int(v) if v else None
+
+    def _set_label(self, set_id: int) -> str:
+        for lab in self._index["labels"].values():
+            if lab.get("set_id") == set_id and lab.get("title"):
+                return f'{lab.get("artist", "")} - {lab.get("title", "")}'.strip(" -")
+        return f"mapa (set {set_id})"
+
+    def block_map(self, user_id: int, *, beatmap_id: int | None = None, beatmapset_id: int | None = None, scope: str = "set", note: str = "") -> dict[str, Any]:
+        """Deixa de recomendar um mapa a este jogador. `scope="set"` (omissão): o mapa inteiro, todas as dificuldades — se o set for desconhecido, bloqueia só essa
+        dificuldade. `scope="diff"`: só a dificuldade `beatmap_id`. Guarda a preferência na BD e uma linha no ficheiro de feedback."""
+        from sqlalchemy import select
+
+        from ..storage import models as m
+        from ..storage.database import utcnow
+
+        if scope not in ("set", "diff"):
+            return {"error": "âmbito inválido (set ou diff)"}
+        if beatmap_id is None and beatmapset_id is None:
+            return {"error": "indica o mapa (id da dificuldade, id do set ou link)"}
+        try:
+            self._load()
+        except Exception:  # sem índice (testes): bloqueia-se na mesma, sem etiquetas
+            self._index = self._index or {"ids": [], "x": None, "axis": None, "labels": {}, "set_ids": []}
+        if beatmapset_id is None and beatmap_id is not None:
+            beatmapset_id = self._set_of(beatmap_id)
+        if scope == "set" and not beatmapset_id:
+            scope = "diff"  # set desconhecido: só se consegue bloquear a dificuldade
+        if scope == "diff" and beatmap_id is None:
+            return {"error": "para bloquear só uma dificuldade é preciso o id dessa dificuldade"}
+        lab = (self._index["labels"].get(int(beatmap_id)) or {}) if beatmap_id is not None else {}
+        label = f'{lab.get("artist", "")} - {lab.get("title", "")}'.strip(" -") if lab.get("title") else (self._set_label(int(beatmapset_id)) if beatmapset_id else "")
+        if scope == "diff" and lab.get("version"):
+            label += f' [{lab["version"]}]'
+        bm = int(beatmap_id) if beatmap_id is not None else None
+        st = int(beatmapset_id) if beatmapset_id else None
+        bl = m.recommendation_blocks.c
+        with self.store.engine.begin() as c:
+            dup = c.execute(select(bl.id).where(bl.user_id == user_id, bl.scope == scope, (bl.beatmapset_id == st) if scope == "set" else (bl.beatmap_id == bm))).first()
+            when = utcnow()
+            name = c.execute(select(m.users.c.username).where(m.users.c.user_id == user_id)).scalar()
+            if dup is None:
+                c.execute(m.recommendation_blocks.insert().values(user_id=user_id, scope=scope, beatmap_id=bm, beatmapset_id=st, label=label[:300], note=note[:300], created_at=when))
+        if dup is None:
+            self._write_feedback_line(when, name or user_id, user_id, bm, st, label, "bloquear_mapa" if scope == "set" else "bloquear_dificuldade", "", [], None, note)
+        return {"ok": True, "scope": scope, "beatmap_id": bm, "beatmapset_id": st, "label": label, "already": dup is not None}
+
+    def unblock(self, user_id: int, block_id: int) -> dict[str, Any]:
+        from sqlalchemy import select
+
+        from ..storage import models as m
+        from ..storage.database import utcnow
+
+        bl = m.recommendation_blocks
+        with self.store.engine.begin() as c:
+            row = c.execute(select(bl).where(bl.c.id == block_id, bl.c.user_id == user_id)).mappings().first()
+            if row is None:
+                return {"error": "bloqueio não encontrado"}
+            c.execute(bl.delete().where(bl.c.id == block_id))
+            name = c.execute(select(m.users.c.username).where(m.users.c.user_id == user_id)).scalar()
+        self._write_feedback_line(utcnow(), name or user_id, user_id, row["beatmap_id"], row["beatmapset_id"], row["label"] or "", "desbloquear", "", [], None, "")
+        return {"ok": True}
+
+    def blocks(self, user_id: int) -> list[dict[str, Any]]:
+        from sqlalchemy import select
+
+        from ..storage import models as m
+
+        bl = m.recommendation_blocks
+        with self.store.engine.connect() as c:
+            rows = c.execute(select(bl).where(bl.c.user_id == user_id).order_by(bl.c.created_at.desc(), bl.c.id.desc())).mappings().all()
+        out = []
+        for r in rows:
+            url = (f"https://osu.ppy.sh/beatmapsets/{r['beatmapset_id']}" if r["scope"] == "set" and r["beatmapset_id"] else beatmap_url(r["beatmap_id"], r["beatmapset_id"]))
+            out.append({"id": r["id"], "scope": r["scope"], "beatmap_id": r["beatmap_id"], "beatmapset_id": r["beatmapset_id"], "label": r["label"] or "",
+                        "created_at": r["created_at"].isoformat() + "Z" if r["created_at"] else None, "url": url})
+        return out
 
     # ------------------------------------------------------------- feedback
     def model_info(self) -> dict[str, Any]:
@@ -534,7 +717,8 @@ class Recommender:
         self.feedback_file.parent.mkdir(parents=True, exist_ok=True)
         new = not self.feedback_file.exists() or self.feedback_file.stat().st_size == 0
         row = [when.strftime("%Y-%m-%d %H:%M:%S"), name, user_id, beatmap_id, set_id or "", label, verdict, kind, ",".join(skills),
-               "" if score is None else f"{score:.4f}", note, beatmap_url(beatmap_id, set_id)]
+               "" if score is None else f"{score:.4f}", note,
+               beatmap_url(beatmap_id, set_id) if beatmap_id is not None else (f"https://osu.ppy.sh/beatmapsets/{int(set_id)}" if set_id else "")]
         with self.feedback_file.open("a", encoding="utf-8", newline="") as f:
             if new:
                 f.write(TAB.join(self.FEEDBACK_HEADER) + NL)

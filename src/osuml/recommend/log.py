@@ -29,12 +29,13 @@ def _now() -> datetime:
 
 
 def log_recommendations(store, user_id: int, items: list[dict[str, Any]], skills: list[str], model_fp: str | None, when: datetime | None = None) -> int:
-    """Grava as sugestões devolvidas (uma linha por mapa)."""
+    """Grava as sugestões devolvidas (uma linha por mapa). Regista os valores do MODELO (`*_model`, antes da correção por jogador) para o relatório e a estimativa
+    dessa correção não ficarem circulares."""
     from ..storage import models as m
 
     when = when or _now()
     rows = [{"user_id": int(user_id), "beatmap_id": int(it["beatmap_id"]), "kind": "recomendacao", "model_fp": model_fp, "created_at": when, "asof": when,
-             "skills": ",".join(skills), "tier": it.get("tier"), "p_pass": it.get("p_pass"), "acc_pass": it.get("acc_pass"), "p_pass_raw": it.get("p_pass_raw"),
+             "skills": ",".join(skills), "tier": it.get("tier"), "p_pass": it.get("p_pass_model", it.get("p_pass")), "acc_pass": it.get("acc_pass_model", it.get("acc_pass")), "p_pass_raw": it.get("p_pass_raw"),
              "acc_pass_raw": it.get("acc_pass_raw"), "challenge": max(it["delta"].values()) if it.get("delta") else None} for it in items]
     if rows:
         with store.engine.begin() as c:

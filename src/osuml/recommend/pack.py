@@ -105,6 +105,18 @@ def build_pack(store, index_dir: Path, models_dir: Path, out_zip: Path, players:
         for f in [*models, *([models_dir / "calibration_pass_acc.json"] if (models_dir / "calibration_pass_acc.json").exists() else [])]:
             shutil.copy2(f, root / "models" / f.name)
         copied = _copy_players(store, root / "players.db", players)
+        try:  # correção por jogador (só dos jogadores do pacote): o registo de previsões não vai no pacote
+            from sqlalchemy import select
+
+            from ..storage import models as m
+            from .adjust import compute_adjustments, save_adjustments
+
+            wanted = {p.strip().lower() for p in players if p.strip()}
+            with store.engine.connect() as c:
+                ids = {int(u) for u, n in c.execute(select(m.users.c.user_id, m.users.c.username)).all() if n.lower() in wanted or str(u) in wanted}
+            save_adjustments(root / "models", compute_adjustments(store, models_dir), only=ids)
+        except Exception:  # noqa: BLE001 — sem registo (BD limpa) o pacote funciona sem correção por jogador
+            pass
         shutil.rmtree(root / "raw", ignore_errors=True)
         training = _training_summary(training_results)
         if training:
