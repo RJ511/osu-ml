@@ -325,3 +325,13 @@ def test_best_snapshot_stops_at_the_200_item_ceiling(env):
     best_calls = [c for c in fake.calls if c[1].endswith("/scores/best")]
     assert [int(c[2]["offset"]) for c in best_calls] == [0, 100]
     assert summary["sources"]["best"]["requests"] == 2
+
+
+def test_legacy_scores_with_a_completed_rank_are_passes_even_if_the_api_says_passed_false():
+    from osuml.storage.normalize import effective_passed, normalize_score
+
+    legacy_a = {"id": 1, "user_id": 2, "beatmap_id": 3, "passed": False, "rank": "A", "legacy_score_id": 99}
+    assert effective_passed(legacy_a) is True and normalize_score(legacy_a)["passed"] is True  # stable: rank A = completou o mapa
+    assert effective_passed({**legacy_a, "rank": "F"}) is False  # rank F nunca é passe
+    assert effective_passed({**legacy_a, "legacy_score_id": None}) is False  # lazer: `passed` é fiável (falhado = rank F)
+    assert effective_passed({**legacy_a, "passed": True}) is True and effective_passed({"id": 1}) is None

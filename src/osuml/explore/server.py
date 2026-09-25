@@ -152,7 +152,7 @@ const AXL=[["aim","Aim"],["speed","Speed"],["stamina","Stamina"],["reading","Rea
 const KIND={novo:"novo",rejogar:"rejogar",tentar_de_novo:"tentar de novo"};
 function recCard(uid){
  const box=el("div","card2"),head=el("div");head.appendChild(el("b","","Recomendar mapas"));
- box.appendChild(head);box.appendChild(el("div","sub","Escolhe a(s) skill(s) que queres melhorar. O resto é automático: mapas alcançáveis (≥ 88 % de accuracy) que te desafiem nessas skills, do estilo de jogadores parecidos; mapas já jogados voltam se a accuracy/pp prevista for bastante superior à atual."));
+ box.appendChild(head);box.appendChild(el("div","sub","Escolhe a(s) skill(s) que queres melhorar. O resto é automático: mapas com accuracy esperada ≥ 88 % (ideal ~93 %) que te desafiem nessas skills, do estilo de jogadores parecidos; mapas já jogados voltam se a accuracy/pp prevista for bastante superior à atual."));
  const row=el("div","tools"),sel=new Set();
  AXL.forEach(([k,l])=>{const b=el("button","",l);b.onclick=()=>{if(sel.has(k)){sel.delete(k);b.classList.remove("on")}else{sel.add(k);b.classList.add("on")}};row.appendChild(b)});
  const go=el("button","go","Recomendar"),msg=el("span","sub");row.append(go,msg);box.appendChild(row);
@@ -165,9 +165,9 @@ function recCard(uid){
   const lv=r.player.levels;out.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
   const cols=[{h:"#",sort:x=>x.rank,render:x=>String(x.rank)},
    {h:"Mapa",sort:x=>x.label.toLowerCase(),num:false,cls:"wrap",render:x=>{const a=el("a","lk",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";const w=el("span");w.appendChild(a);w.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));return w}},
-   {h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
+   {h:"Nível",sort:x=>x.tier,num:false,render:x=>x.tier==="seguro"?"seguro":"arriscado"},{h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
    {h:"Desafio",sort:x=>x.delta[r.skills[0]],render:x=>r.skills.map(a=>a+" "+(x.delta[a]>=0?"+":"")+x.delta[a].toFixed(1)).join(" · ")},
-   {h:"≥88 %",sort:x=>x.p88,render:x=>Math.round(x.p88*100)+" %"},{h:"Acc prov.",sort:x=>x.acc_pred,render:x=>(x.acc_pred*100).toFixed(1)+" %"},
+   {h:"P(passar)",sort:x=>x.p_pass,render:x=>Math.round(x.p_pass*100)+" %"},{h:"Acc se passar",sort:x=>x.acc_pass,render:x=>(x.acc_pass*100).toFixed(1)+" %"},
    {h:"Acc atual",sort:x=>x.acc_cur,render:x=>x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"},
    {h:"pp est.",sort:x=>x.pp_gain_pct,render:x=>x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"},
    {h:"Estilo",sort:x=>x.style_pct,render:x=>x.style_pct.toFixed(0)},

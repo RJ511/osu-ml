@@ -19,7 +19,7 @@ que chega para ler dados públicos.
 ## Recomendador de mapas (sem API, sem credenciais)
 
 Escreve o nome de um jogador **que já está no pacote de dados**, escolhe a(s) skill(s) que queres melhorar (Aim, Speed, Stamina, Reading)
-e recebe mapas que te desafiem nelas, que a princípio consigas fazer (≥ 88 % de accuracy) e do estilo de jogadores parecidos. Cada sugestão
+e recebe mapas que te desafiem nelas, que consigas passar (P(passar) ≥ 80 %) com accuracy esperada ao passar de pelo menos 88 % (ideal ~93 %) e do estilo de jogadores parecidos. Cada sugestão
 tem "Serve / Não serve"; o feedback fica num ficheiro de texto.
 
 ```bash
@@ -35,7 +35,7 @@ python -m osuml recommend feedback --player "PXD Vieira" --beatmap 2196749 --ver
 - **Pacote de dados** (`osuml recommend pack --players "PXD Vieira" gaaGOD --out dist/osuml-pack.zip`): índice, modelos e só os jogadores indicados.
   **Não vai neste repositório nem numa release pública**: deriva dos dumps do data.ppy.sh, cuja licença só permite análise estatística e não
   exposição pública sem autorização do ppy (contact@ppy.sh). Distribuir à parte, em privado.
-- O recomendador estima, não garante: prevê a accuracy provável a partir do perfil do jogador, sem mods, forma do dia nem ritmo de evolução.
+- O recomendador estima, não garante: prevê a accuracy esperada a partir do perfil do jogador (probabilidades calibradas com jogadores da API), sem mods, forma do dia nem ritmo de evolução.
 
 ## Utilização
 

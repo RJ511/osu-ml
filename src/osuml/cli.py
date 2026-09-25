@@ -244,7 +244,7 @@ def cmd_analyze(args: argparse.Namespace, settings: Settings) -> int:
 
     proc = settings.processed_dir
     scores = [Path(f) for f in args.scores] if args.scores else sorted((proc / "dump_scores" / "v1").glob("dump_scores_*.parquet"))
-    if not scores and args.analysis_step not in ("pass-model", "reach-model", "similarity", "export-api-plays", "reach-api-check"):  # esses leem os Parquet de --inputs
+    if not scores and args.analysis_step not in ("pass-model", "reach-model", "similarity", "export-api-plays", "reach-api-check", "reach-calibrate", "acc-model", "pass-calibrate", "fail-points"):  # esses leem os Parquet de --inputs
         print("Sem scores de dump: corre primeiro `osuml dump-scores`.", file=sys.stderr)
         return 1
     out_dir = Path(args.out_dir) if args.out_dir else proc / "analysis" / args.analysis_step.replace("-", "_")
@@ -260,6 +260,31 @@ def cmd_analyze(args: argparse.Namespace, settings: Settings) -> int:
         from .analysis.pass_model import export_api_plays
 
         out = export_api_plays(_store(settings), Path(args.out) if args.out else out_dir / "inputs" / "api_plays.parquet")
+    elif args.analysis_step == "acc-model":
+        from .analysis.acc_model import run_acc_model
+
+        inputs = Path(args.inputs) if args.inputs else out_dir / "inputs"
+        out = run_acc_model(inputs, out_dir, args.version, rounds=args.rounds, threads=args.threads, cap_rows=args.cap_rows,
+                            cap_train=args.cap_train, seed=args.seed, progress_path=progress, sample_pct=args.sample_pct)
+    elif args.analysis_step == "fail-points":
+        from .analysis.fail_points import analyze
+
+        bundle = Path(args.bundle) if args.bundle else catalog_dir / "osu_subset.tar.gz"
+        out = analyze(_store(settings), bundle, out_dir, args.version, progress_path=progress)
+    elif args.analysis_step == "pass-calibrate":
+        from .analysis.pass_calibration import run_pass_calibration
+
+        rdir = proc / "recommend"
+        out = run_pass_calibration(_store(settings), Path(args.index_dir) if args.index_dir else rdir / "index",
+                                   Path(args.models_dir) if args.models_dir else rdir / "models", out_dir, args.version, cutoff=args.cutoff,
+                                   progress_path=progress)
+    elif args.analysis_step == "reach-calibrate":
+        from .analysis.reach_calibration import run_reach_calibration
+
+        rdir = proc / "recommend"
+        out = run_reach_calibration(_store(settings), Path(args.index_dir) if args.index_dir else rdir / "index",
+                                    Path(args.models_dir) if args.models_dir else rdir / "models", out_dir, args.version, cutoff=args.cutoff,
+                                    progress_path=progress)
     elif args.analysis_step == "reach-api-check":
         from .analysis.reach_api_check import run_reach_api_check
 
@@ -350,10 +375,10 @@ def _make_recommender(args: argparse.Namespace, settings: Settings):
     if pack is not None:
         store = Store(f"sqlite:///{(pack / 'players.db').as_posix()}", pack / "raw")
         fb = Path(args.feedback_file) if getattr(args, "feedback_file", None) else pack / "feedback" / "recomendacoes_feedback.txt"
-        return Recommender(store, pack / "index", pack / "models", feedback_file=fb), fb
+        return Recommender(store, pack / "index", pack / "models", feedback_file=fb, log_predictions=True), fb
     proc = settings.processed_dir
     fb = Path(args.feedback_file) if getattr(args, "feedback_file", None) else settings.data_dir / "feedback" / "recomendacoes_feedback.txt"
-    return Recommender(_store(settings), proc / "recommend" / "index", proc / "recommend" / "models", feedback_file=fb), fb
+    return Recommender(_store(settings), proc / "recommend" / "index", proc / "recommend" / "models", feedback_file=fb, log_predictions=True), fb
 
 
 def _recommend_tools(args: argparse.Namespace, settings: Settings) -> int:
@@ -370,7 +395,7 @@ def _recommend_tools(args: argparse.Namespace, settings: Settings) -> int:
         proc = settings.processed_dir
         out = build_pack(_store(settings), Path(args.index_dir) if args.index_dir else proc / "recommend" / "index",
                          Path(args.models_dir) if args.models_dir else proc / "recommend" / "models", Path(args.out), args.players, note=args.note,
-                         training_results=Path(args.training_results) if args.training_results else None)
+                         training_results=[Path(f) for f in args.training_results] if args.training_results else None)
         print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
         return 0
     if step == "upload":
@@ -429,7 +454,7 @@ def _recommend_tools(args: argparse.Namespace, settings: Settings) -> int:
         print(f"Sugestões para {found[1]} ({', '.join(res['skills'])}):")
         for i, it in enumerate(res["items"], 1):
             acc = "" if it["acc_cur"] is None else f" (atual {it['acc_cur'] * 100:.1f}%)"
-            print(f"{i:2d}. [{it['kind']}] {it['label']}  {it['stars']:.2f}*  >=88%: {it['p88'] * 100:.0f}%  acc prov. {it['acc_pred'] * 100:.1f}%{acc}\n"
+            print(f"{i:2d}. [{it['kind']}] {it['label']}  {it['stars']:.2f}*  P(passar): {it['p_pass'] * 100:.0f}%  acc se passar {it['acc_pass'] * 100:.1f}%{acc}\n"
                   f"      ID do mapa: {it['beatmap_id']}  {it['url']}\n      {it['why']}")
         return 0
     out = rec.feedback(found[0], args.beatmap, args.verdict, [x.strip() for x in args.skills.split(",") if x.strip()], note=args.note)
@@ -509,7 +534,7 @@ def cmd_panel(args: argparse.Namespace, settings: Settings) -> int:
     from .recommend import Recommender
 
     recommender = Recommender(store, settings.processed_dir / "recommend" / "index", settings.processed_dir / "recommend" / "models",
-                              feedback_file=settings.data_dir / "feedback" / "recomendacoes_feedback.txt")
+                              feedback_file=settings.data_dir / "feedback" / "recomendacoes_feedback.txt", log_predictions=True)
     server, _ = make_dashboard(ctrl, cat_ctrl, args.port, checker_factory, jobs, recommender)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Painel em {url}  (Ctrl+C para sair; nenhum pedido à API é feito até carregares em 'Iniciar' na Recolha)")
@@ -579,7 +604,42 @@ def cmd_poll(args: argparse.Namespace, settings: Settings) -> int:
     finally:
         close()
     log_line({k: out[k] for k in ("polled", "errors", "inactive", "skipped", "due_total", "requests_last_24h") if k in out})
+    if out.get("polled") and not getattr(args, "no_eval", False):
+        try:  # comparação automática previsão/realidade com as jogadas novas; nunca pode estragar uma recolha
+            from .recommend.log import evaluate_pending
+
+            rec = _eval_recommender(settings, store)
+            if rec.ready()[0]:
+                log_line({"eval": evaluate_pending(store, rec)})
+        except Exception as exc:  # noqa: BLE001
+            log_line({"eval_error": f"{type(exc).__name__}: {exc}"})
     print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+    return 0
+
+
+def _eval_recommender(settings: Settings, store):
+    from .recommend import Recommender
+
+    proc = settings.processed_dir
+    return Recommender(store, proc / "recommend" / "index", proc / "recommend" / "models")
+
+
+def cmd_eval_log(args: argparse.Namespace, settings: Settings) -> int:
+    """Compara previsão e realidade (0 pedidos): liga as recomendações jogadas, faz a avaliação-sombra das jogadas novas e mostra o relatório."""
+    from datetime import datetime
+
+    from .recommend.log import evaluate_pending, report
+
+    store = _store(settings)
+    since = datetime.fromisoformat(args.since) if args.since else None
+    if not args.report_only:
+        rec = _eval_recommender(settings, store)
+        ok, why = rec.ready()
+        if not ok:
+            print(why, file=sys.stderr)
+            return 1
+        print(json.dumps(evaluate_pending(store, rec, since=since, batch=args.batch), ensure_ascii=False))
+    print(json.dumps(report(store, since=since), indent=2, ensure_ascii=False, default=str))
     return 0
 
 
@@ -613,7 +673,7 @@ def cmd_categorize(args: argparse.Namespace, settings: Settings) -> int:
 
 def _handlers() -> dict:
     return {"collect": cmd_collect, "status": cmd_status, "export": cmd_export, "maps": cmd_maps,
-            "sync-s3": cmd_sync_s3, "dump-scores": cmd_dump_scores, "map-catalog": cmd_map_catalog, "analyze": cmd_analyze, "recommend": cmd_recommend, "dump-table": cmd_dump_table, "panel": cmd_panel, "poll": cmd_poll, "categorize": cmd_categorize}
+            "sync-s3": cmd_sync_s3, "dump-scores": cmd_dump_scores, "map-catalog": cmd_map_catalog, "analyze": cmd_analyze, "recommend": cmd_recommend, "dump-table": cmd_dump_table, "panel": cmd_panel, "poll": cmd_poll, "categorize": cmd_categorize, "eval-log": cmd_eval_log}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -674,7 +734,12 @@ def main(argv: list[str] | None = None) -> int:
     ct.add_argument("--reference-version", default="v3", help="pool de referência a usar (omissão: v3)")
     ct.add_argument("--open", action="store_true", help="abre o navegador")
 
+    ev = sub.add_parser("eval-log", help="compara previsão e realidade com as jogadas novas (0 pedidos): recomendações jogadas + avaliação-sombra + relatório")
+    ev.add_argument("--since", default=None, help="AAAA-MM-DD: recupera o histórico desde esta data (use com --batch day)")
+    ev.add_argument("--batch", choices=["new", "day"], default="new", help="new = só o que entrou desde a última avaliação; day = uma passagem por dia (histórico)")
+    ev.add_argument("--report-only", action="store_true", help="só mostra o relatório, sem avaliar")
     pl = sub.add_parser("poll", help="recolha contínua e irregular dos jogadores do painel (<24 h por jogador)")
+    pl.add_argument("--no-eval", action="store_true", help="não fazer a comparação previsão/realidade no fim (0 pedidos)")
     pl.add_argument("--max-players", type=int, default=6, help="máx. de jogadores por execução (omissão: 6)")
     pl.add_argument("--max-start-delay", type=int, default=0, help="jitter aleatório (s) antes de começar")
     pl.add_argument("--dry-run", action="store_true", help="mostra o que faria; 0 pedidos")
@@ -723,6 +788,10 @@ def main(argv: list[str] | None = None) -> int:
                       ("playcount-check", "testa se playcount - passes estima fails (sem API)"),
                       ("export-api-plays", "exporta os scores da BD (API) para Parquet, para avaliar o modelo pass/fail"),
                       ("reach-api-check", "valida os modelos >=88/93 %% com os jogadores da API (BD local, 0 pedidos)"),
+                      ("acc-model", "modelo da accuracy esperada SE PASSAR (mediana do melhor passe do par) para jogador+mapa (treinar no RunPod)"),
+                      ("fail-points", "onde e porquê o jogador falha: progresso, morte (HP) vs reinício e o trecho do mapa (BD local, 0 pedidos)"),
+                      ("pass-calibrate", "valida e calibra P(passar) e a accuracy se passar com jogadores da API (guarda calibration_pass_acc.json; 0 pedidos)"),
+                      ("reach-calibrate", "calibra os modelos >=88/93 %% para jogadores da API (guarda calibration.json ao lado dos modelos; 0 pedidos)"),
                       ("pass-model", "modelo P(passar alguma vez | jogador, mapa) com avaliação (treinar no RunPod)"),
                       ("reach-model", "modelo P(chegar a >=88 %% / >=93 %% de accuracy | jogador, mapa) e a sua fiabilidade"),
                       ("similarity", "compara semelhança de estilo: jogadores parecidos vs mapa a mapa (recall de mapas escondidos)")):
@@ -734,7 +803,7 @@ def main(argv: list[str] | None = None) -> int:
         a.add_argument("--seed", type=int, default=42)
         if name == "export-api-plays":
             a.add_argument("--out", default=None)
-        if name == "reach-api-check":
+        if name in ("reach-api-check", "reach-calibrate", "pass-calibrate"):
             a.add_argument("--index-dir", default=None)
             a.add_argument("--models-dir", default=None)
             a.add_argument("--cutoff", default="2026-09-01")
@@ -752,6 +821,15 @@ def main(argv: list[str] | None = None) -> int:
             a.add_argument("--threads", type=int, default=4)
             a.add_argument("--cap-rows", type=int, default=800)
             a.add_argument("--cap-train", type=int, default=4_000_000)
+            a.add_argument("--sample-pct", type=int, default=100)
+        if name == "fail-points":
+            a.add_argument("--bundle", default=None, help=".osu dos mapas (omissão: catalog/v1/osu_subset.tar.gz)")
+        if name == "acc-model":
+            a.add_argument("--inputs", default=None, help="pasta com playcount, dump_scores e map_attributes (.parquet)")
+            a.add_argument("--rounds", type=int, default=500)
+            a.add_argument("--threads", type=int, default=4)
+            a.add_argument("--cap-rows", type=int, default=800)
+            a.add_argument("--cap-train", type=int, default=8_000_000)
             a.add_argument("--sample-pct", type=int, default=100)
         if name == "pass-model":
             a.add_argument("--inputs", default=None, help="pasta com playcount, dump_scores, map_attributes e api_plays (.parquet)")
@@ -823,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
     pk.add_argument("--index-dir", default=None)
     pk.add_argument("--models-dir", default=None)
     pk.add_argument("--note", default="")
-    pk.add_argument("--training-results", default=None, help="results.json do reach-model (guarda no pacote o resumo do treino, sem dados de jogadores)")
+    pk.add_argument("--training-results", nargs="*", default=None, help="results.json do pass-model e do acc-model (guarda no pacote o resumo do treino, sem dados de jogadores)")
     sy = sub.add_parser("sync-s3", help="espelha data/raw/ + data/processed/ + dump para o bucket S3 (0 pedidos à osu!API)")
     sy.add_argument("--dry-run", action="store_true", help="não contacta o S3, só lista o que seria enviado")
     sy.add_argument("--dump-path", help="dump a incluir (omissão: primeiro *.tar.bz2 encontrado na raiz do projeto)")
