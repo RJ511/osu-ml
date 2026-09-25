@@ -31,7 +31,8 @@ MIN_BRIER_GAIN = 0.002  # a nova calibração tem de melhorar o Brier em CV por 
 MIN_MAE_GAIN = 0.0005
 
 
-def _rows(store, since: datetime | None = None) -> list[dict[str, Any]]:
+def _rows(store, since: datetime | None = None, model_fp: str | None = None) -> list[dict[str, Any]]:
+    """Avaliações-sombra com resultado. `model_fp`: só as previsões feitas por esse modelo (depois de um retreino as antigas não servem para corrigir o novo)."""
     from sqlalchemy import select
 
     from ..storage import models as m
@@ -40,6 +41,8 @@ def _rows(store, since: datetime | None = None) -> list[dict[str, Any]]:
     q = select(pl).where(pl.c.kind == "sombra", pl.c.evaluated_at.isnot(None))
     if since is not None:
         q = q.where(pl.c.asof >= since)
+    if model_fp is not None:
+        q = q.where(pl.c.model_fp == model_fp)
     with store.engine.connect() as c:
         return [dict(r) for r in c.execute(q).mappings().all()]
 
@@ -58,9 +61,11 @@ def compute_adjustments(store, models_dir: Path | None = None, since: datetime |
 
     from ..analysis.reach_calibration import logit, sigmoid
 
+    from .core import models_fingerprint
+
     cal_pass, acc_shift = _current_calibration(models_dir)
     by_user: dict[int, dict[str, Any]] = {}
-    for r in _rows(store, since):
+    for r in _rows(store, since, models_fingerprint(models_dir) if models_dir is not None else None):
         u = by_user.setdefault(int(r["user_id"]), {"d": [], "s": 0.0, "v": 0.0, "n_pass": 0})
         if r["best_acc"] is not None and r["acc_pass_raw"] is not None:
             u["d"].append(float(np.clip(r["acc_pass_raw"] + acc_shift, 0.0, 1.0)) - float(r["best_acc"]))
@@ -128,8 +133,10 @@ def recalibrate(store, models_dir: Path, *, apply: bool = False, folds: int = 5)
 
     from ..analysis.reach_calibration import ece, fit_platt, logit, sigmoid
 
+    from .core import models_fingerprint
+
     models_dir = Path(models_dir)
-    rows = _rows(store)
+    rows = _rows(store, model_fp=models_fingerprint(models_dir))
     lz = [r for r in rows if (r["n_lazer_attempts"] or 0) > 0 and r["p_pass_raw"] is not None and r["passed"] is not None]
     users = sorted({r["user_id"] for r in lz})
     out: dict[str, Any] = {"n_pairs_lazer": len(lz), "n_players_lazer": len(users), "applied": False}

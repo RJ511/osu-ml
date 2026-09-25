@@ -139,6 +139,20 @@ class LightGbmPredictor:
         return self.predict_both(x)[1]
 
 
+def models_fingerprint(models_dir: Path) -> str | None:
+    """Impressão digital (12 hex) dos modelos `pass_model_A.txt` + `acc_pass_A.txt`; None se faltarem. Identifica que modelo fez cada previsão registada."""
+    import hashlib
+
+    files = [f for f in (Path(models_dir) / "pass_model_A.txt", Path(models_dir) / "acc_pass_A.txt") if f.exists()]
+    if not files:
+        return None
+    h = hashlib.sha256()
+    for f in files:
+        h.update(f.name.encode())
+        h.update(f.read_bytes())
+    return h.hexdigest()[:12]
+
+
 class PassAccPredictor:
     """P(passar) (`pass_model_A.txt`) e accuracy esperada SE PASSAR (`acc_pass_A.txt`, mediana).
 
@@ -652,14 +666,8 @@ class Recommender:
     # ------------------------------------------------------------- feedback
     def model_info(self) -> dict[str, Any]:
         """Que modelo está carregado: impressão digital dos ficheiros `reach_acc*_A.txt` + resumo do treino (se o pacote o traz)."""
-        import hashlib
-
         files = [f for f in (self.models_dir / "pass_model_A.txt", self.models_dir / "acc_pass_A.txt") if f.exists()]
-        h = hashlib.sha256()
-        for f in files:
-            h.update(f.name.encode())
-            h.update(f.read_bytes())
-        info: dict[str, Any] = {"fingerprint": h.hexdigest()[:12] if files else None, "n_models": len(files)}
+        info: dict[str, Any] = {"fingerprint": models_fingerprint(self.models_dir), "n_models": len(files)}
         cal = self.models_dir / "calibration_pass_acc.json"
         if cal.exists():
             import json as _json

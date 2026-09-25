@@ -144,7 +144,8 @@ def shadow_evaluate(store, rec, *, since: datetime | None = None, batch: str = "
             asof = min(e for _, e, _ in g)
             maps = sorted({b for b, _, _ in g})
             with store.engine.connect() as c:
-                done = {r[0] for r in c.execute(select(pl.c.beatmap_id).where(pl.c.user_id == uid, pl.c.kind == "sombra", pl.c.asof == asof)).all()}
+                done = {r[0] for r in c.execute(select(pl.c.beatmap_id).where(pl.c.user_id == uid, pl.c.kind == "sombra", pl.c.asof == asof,
+                                                                              pl.c.model_fp == rec.model_info().get("fingerprint"))).all()}
             maps = [b for b in maps if b not in done]
             if not maps:
                 continue

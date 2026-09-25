@@ -8,6 +8,10 @@ Estimativa de tempo: o painel calcula-a a partir da velocidade medida (computed_
 
 Retomável: um download parcial continua com `Range`; importações cujo Parquet já existe (com manifest) não se repetem;
 `--from-stage N` salta fases já concluídas.
+
+Retreino mensal (`docs/retreino_mensal.md`): `--random-snaps 2026_10_01 --top-snap 2026_10_01 --osu-files-snap 2026_10_01` descarrega e importa SÓ o dump novo (os antigos
+já tratados seguem do PC para `inputs/`), descarrega o dump de `.osu` do mês, recalcula o catálogo, treina P(passar) (sem top_10000) e a accuracy ao passar (com top_10000)
+e junta tudo em `retrain_outputs.tar` (models/, results/, parquet/, catalog/) para o `osuml maintenance retrain-finish`.
 """
 
 from __future__ import annotations
@@ -31,11 +35,15 @@ PROG, LOGS, DUMPS, INPUTS = WORK / "progress", WORK / "logs", WORK / "dumps", WO
 DATA = WORK / "data"  # OSUML_DATA_DIR -> processed em DATA/processed
 SNAPSHOTS = ["2026_08_01", "2026_07_13", "2026_06_01", "2026_05_01", "2026_04_01"]
 URL = "https://data.ppy.sh/{s}_performance_osu_{k}.tar.bz2"
+OSU_FILES_URL = "https://data.ppy.sh/{s}_osu_files.tar.bz2"
 TOP_SNAP, TOP_KIND = "2026_09_01", "top_10000"  # +9 mil jogadores de topo (autorizado pelo utilizador)
 THRESHOLDS = "0.85,0.88,0.90,0.93,0.95,0.97"
 ENV = {**os.environ, "OSUML_DATA_DIR": str(DATA), "PYTHONUNBUFFERED": "1"}
 VERSION = "full"
-STAGES = ["download+import", "catálogo de mapas", "resumo dos dados", "modelo pass/fail", "modelo alcançável", "empacotar"]
+STAGES = ["download+import", "catálogo de mapas", "resumo dos dados", "modelo pass/fail", "modelo accuracy ao passar", "empacotar"]
+INPUTS_PASS = WORK / "inputs_pass"  # o modelo pass/fail treina-se sem o top_10000 (só accuracy usa os jogadores de topo)
+NEW_SNAPS: list[tuple[str, str]] = []  # (snapshot, kind) descarregados nesta execução: são os Parquet que voltam ao PC
+OSU_SNAP: str | None = None
 _lock = threading.Lock()
 
 
@@ -77,7 +85,10 @@ def _fetch_chunk(url: str, part: Path, start: int, end: int, prog: Progress, plo
 
 def download(snap: str, kind: str = "random_10000", conns: int = 1) -> Path:
     """Download com `conns` ligações paralelas (blocos de 32 MB com Range, retomáveis): a origem limita cada ligação (o top_10000 dá ~1 MB/s por ligação)."""
-    url, dest = URL.format(s=snap, k=kind), DUMPS / f"{snap}_performance_osu_{kind}.tar.bz2"
+    if kind == "osu_files":
+        url, dest = OSU_FILES_URL.format(s=snap), DUMPS / f"{snap}_osu_files.tar.bz2"
+    else:
+        url, dest = URL.format(s=snap, k=kind), DUMPS / f"{snap}_performance_osu_{kind}.tar.bz2"
     tag = snap if kind == "random_10000" else f"{snap}_{kind}"
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "osuml-pod/1.0"})
     size = int(urllib.request.urlopen(req, timeout=60).headers["Content-Length"])
@@ -111,10 +122,23 @@ def download(snap: str, kind: str = "random_10000", conns: int = 1) -> Path:
     return dest
 
 
+def _is_imported(snap: str, kind: str) -> bool:
+    stem = f"{snap}_{kind}"
+    manifest = DATA / "processed" / "dump_scores" / "v1" / f"manifest_dump_scores_{stem}.json"
+    pc = DATA / "processed" / "dump_tables" / "v1" / f"osu_user_beatmap_playcount_{stem}.parquet"
+    done = pc.with_suffix(".progress.json")
+    return manifest.exists() and pc.exists() and done.exists() and json.loads(done.read_text())["status"] == "done"
+
+
 def import_snapshot(snap: str, kind: str = "random_10000", workers: int = 1, conns: int = 1) -> None:
-    tar = download(snap, kind, conns)
     stem = f"{snap}_{kind}"
     tag = snap if kind == "random_10000" else f"{snap}_{kind}"
+    NEW_SNAPS.append((snap, kind))
+    if _is_imported(snap, kind):  # já tratado (retomada): não descarrega outra vez
+        log(f"{tag}: já importado")
+        _link_inputs(f"*{stem}.parquet")
+        return
+    tar = download(snap, kind, conns)
     scores = DATA / "processed" / "dump_scores" / "v1" / f"dump_scores_{stem}.parquet"
     manifest = scores.with_name(f"manifest_dump_scores_{stem}.json")
     pc = DATA / "processed" / "dump_tables" / "v1" / f"osu_user_beatmap_playcount_{stem}.parquet"
@@ -129,31 +153,39 @@ def import_snapshot(snap: str, kind: str = "random_10000", workers: int = 1, con
             j.result()
     tar.unlink(missing_ok=True)  # poupa disco (5 GB); um novo download só se tudo recomeçar
     log(f"{tag}: importado")
-    for sub, pat in (("dump_scores", f"dump_scores_{stem}.parquet"), ("dump_tables", f"osu_user_beatmap_playcount_{stem}.parquet")):
-        for f in (DATA / "processed" / sub / "v1").glob(pat):
+    _link_inputs(f"*{stem}.parquet")
+
+
+def _link_inputs(pattern: str = "*.parquet") -> None:
+    """Liga os Parquet tratados no pod (dump_scores, playcount) à pasta de entrada dos modelos, ao lado dos que vieram do PC."""
+    for sub in ("dump_scores", "dump_tables"):
+        for f in (DATA / "processed" / sub / "v1").glob(pattern):
+            if f.suffix != ".parquet":
+                continue
             link = INPUTS / f.name
             if not link.exists():
                 link.symlink_to(f)
 
 
-def stage_import() -> None:
-    with ThreadPoolExecutor(len(SNAPSHOTS)) as ex:
-        for f in [ex.submit(import_snapshot, s) for s in SNAPSHOTS]:
+def stage_import(random_snaps: list[str], top_snap: str | None) -> None:
+    """Descarrega/importa os dumps aleatórios pedidos e, se `top_snap`, o top_10000 (24 ligações; a origem limita cada uma a ~1 MB/s) ao mesmo tempo."""
+    with ThreadPoolExecutor(len(random_snaps) + 1) as ex:
+        fs = [ex.submit(import_snapshot, s) for s in random_snaps]
+        if top_snap:
+            fs.append(ex.submit(import_snapshot, top_snap, TOP_KIND, 6, 24))
+        for f in fs:
             f.result()
-    # junta as fontes novas (pod) às já tratadas no PC (inputs/) numa só pasta para os modelos
-    for sub, pat in (("dump_scores", "dump_scores_*.parquet"), ("dump_tables", "osu_user_beatmap_playcount_*.parquet")):
-        for f in (DATA / "processed" / sub / "v1").glob(pat):
-            link = INPUTS / f.name
-            if not link.exists():
-                link.symlink_to(f)
+    _link_inputs()
 
 
 def stage_catalog() -> None:
     """Atributos (stars/aim/speed/reading/...) de TODOS os mapas dos 7 dumps: os que têm scores + os só tentados (playcount).
     Os mapas que ninguém da amostra passou (os mais difíceis) só aparecem no playcount; sem eles o treino ficava enviesado para mapas fáceis."""
     osu_dump = WORK / "osu_files.tar.bz2"
+    if not osu_dump.exists() and OSU_SNAP:  # retreino mensal: o dump de .osu do mês descarrega-se no pod (1,4 GB)
+        shutil.move(str(download(OSU_SNAP, "osu_files", 8)), osu_dump)
     if not osu_dump.exists():
-        raise FileNotFoundError("falta /root/work/osu_files.tar.bz2 (dump de .osu, enviado do PC)")
+        raise FileNotFoundError("falta /root/work/osu_files.tar.bz2 (dump de .osu, enviado do PC) ou --osu-files-snap")
     import rosu_pp_py  # noqa: F401  (falha cedo se o extra `difficulty` não estiver instalado)
 
     plan = DATA / "processed" / "catalog" / "v2" / "plan.json"
@@ -218,23 +250,50 @@ def stage_summary() -> None:
     log("resumo: " + json.dumps({k: out[k] for k in ("scores_unique_users", "random_users_pairwise_overlap")}))
 
 
+def _prepare_inputs_pass() -> None:
+    """Entrada do modelo pass/fail: tudo menos o top_10000 (o playcount dos jogadores de topo distorce a taxa de passar)."""
+    shutil.rmtree(INPUTS_PASS, ignore_errors=True)
+    INPUTS_PASS.mkdir(parents=True)
+    for f in INPUTS.iterdir():
+        if "_top_10000" not in f.name:
+            (INPUTS_PASS / f.name).symlink_to(f.resolve())
+
+
 def stage_pass(threads: int, cap_train: int, cap_rows: int) -> None:
-    run(["analyze", "pass-model", "--inputs", str(INPUTS), "--out-dir", str(WORK / "results" / "pass_model"), "--version", VERSION,
+    _prepare_inputs_pass()
+    run(["analyze", "pass-model", "--inputs", str(INPUTS_PASS), "--out-dir", str(WORK / "results" / "pass_model"), "--version", VERSION,
          "--progress", str(PROG / f"pass_model_{VERSION}.json"), "--threads", str(threads), "--seeds", "42,43,44", "--rounds", "600",
          "--cap-train", str(cap_train), "--cap-rows", str(cap_rows), "--players", "PXD Vieira=13745526", "gaaGOD=23994179"], "pass_model")
 
 
-def stage_reach(threads: int, cap_train: int, cap_rows: int) -> None:
-    run(["analyze", "reach-model", "--inputs", str(INPUTS), "--out-dir", str(WORK / "results" / "reach_model"), "--version", VERSION,
-         "--progress", str(PROG / f"reach_model_{VERSION}.json"), "--threads", str(threads), "--rounds", "500", "--thresholds", THRESHOLDS,
-         "--only-a", "--cap-train", str(cap_train), "--cap-rows", str(cap_rows)], "reach_model")
+def stage_acc(threads: int, cap_train: int) -> None:
+    """Accuracy esperada SE PASSAR (LightGBM `regression_l1`; usa todos os dados, incluindo o top_10000)."""
+    run(["analyze", "acc-model", "--inputs", str(INPUTS), "--out-dir", str(WORK / "results" / "acc_model"), "--version", VERSION,
+         "--progress", str(PROG / f"acc_model_{VERSION}.json"), "--threads", str(threads), "--rounds", "600", "--cap-train", str(cap_train)], "acc_model")
 
 
 def stage_pack() -> None:
-    subprocess.run(["tar", "-czf", str(WORK / "train_results.tar.gz"), "-C", str(WORK), "results"], check=True)
-    # Parquet novos (playcount) voltam ao PC para reconstruir o índice de "jogadores parecidos"
-    subprocess.run(["tar", "-cf", str(WORK / "new_playcount.tar"), "-C", str(DATA / "processed" / "dump_tables" / "v1")]
-                   + [p.name for p in (DATA / "processed" / "dump_tables" / "v1").glob("osu_user_beatmap_playcount_*_random_10000.parquet")], check=True)
+    """`retrain_outputs.tar`: modelos, métricas, Parquet novos (só os desta execução) e o catálogo — o que o `osuml maintenance retrain-finish` precisa."""
+    import tarfile
+
+    out = WORK / "retrain_outputs.tar"
+    res = WORK / "results"
+    files: list[tuple[Path, str]] = [(res / "pass_model" / VERSION / "pass_model_A.txt", "models/pass_model_A.txt"),
+                                     (res / "acc_model" / VERSION / "acc_pass_A.txt", "models/acc_pass_A.txt"),
+                                     (res / "pass_model" / VERSION / "results.json", "results/pass_model_results.json"),
+                                     (res / "acc_model" / VERSION / "results.json", "results/acc_model_results.json"),
+                                     (DATA / "processed" / "catalog" / "v2" / "map_attributes.parquet", "catalog/map_attributes.parquet")]
+    for snap, kind in NEW_SNAPS:
+        stem = f"{snap}_{kind}"
+        files += [(DATA / "processed" / "dump_scores" / "v1" / f"dump_scores_{stem}.parquet", f"parquet/dump_scores_{stem}.parquet"),
+                  (DATA / "processed" / "dump_tables" / "v1" / f"osu_user_beatmap_playcount_{stem}.parquet", f"parquet/osu_user_beatmap_playcount_{stem}.parquet")]
+    missing = [str(f) for f, _ in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError("faltam resultados para empacotar: " + ", ".join(missing))
+    with tarfile.open(out, "w") as tf:
+        for f, arc in files:
+            tf.add(f, arcname=arc)
+    log(f"empacotado: {out} ({out.stat().st_size / 1e6:.0f} MB)")
 
 
 def main() -> int:
@@ -245,9 +304,14 @@ def main() -> int:
     ap.add_argument("--cap-rows", type=int, default=800)
     ap.add_argument("--version", default="full", help="nome da pasta dos resultados (ex.: full, full_top)")
     ap.add_argument("--only-top", action="store_true", help="só descarrega+importa o top_10000 (processo à parte do treino)")
+    ap.add_argument("--random-snaps", default=None, help="dumps aleatórios a descarregar/importar no pod (ex.: 2026_10_01); omissão: a lista antiga")
+    ap.add_argument("--top-snap", default=None, help="descarrega+importa o top_10000 desta data na fase 1 (retreino mensal)")
+    ap.add_argument("--osu-files-snap", default=None, help="descarrega o dump de .osu desta data para o catálogo (retreino mensal)")
     a = ap.parse_args()
-    global VERSION
+    global VERSION, OSU_SNAP
     VERSION = a.version
+    OSU_SNAP = a.osu_files_snap
+    random_snaps = a.random_snaps.split(",") if a.random_snaps else SNAPSHOTS
     for d in (PROG, LOGS, DUMPS, INPUTS, DATA):
         d.mkdir(parents=True, exist_ok=True)
     if a.only_top:
@@ -262,8 +326,8 @@ def main() -> int:
         log("top_10000 importado (parquet em inputs/)")
         return 0
     overall = Progress(PROG / f"00_pipeline_{VERSION}.json" if VERSION != "full" else PROG / "00_pipeline.json", "Pipeline — a começar", len(STAGES), "fases")
-    fns = [stage_import, stage_catalog, stage_summary, lambda: stage_pass(a.threads, a.cap_train, a.cap_rows),
-           lambda: stage_reach(a.threads, a.cap_train, a.cap_rows), stage_pack]
+    fns = [lambda: stage_import(random_snaps, a.top_snap), stage_catalog, stage_summary, lambda: stage_pass(a.threads, a.cap_train, a.cap_rows),
+           lambda: stage_acc(a.threads, a.cap_train), stage_pack]
     for i, fn in enumerate(fns, 1):
         if i < a.from_stage:
             continue
@@ -277,7 +341,7 @@ def main() -> int:
             return 1
         log(f"fase {i} ({STAGES[i - 1]}) concluída em {time.time() - t0:.0f}s")
     overall.finish(label="Pipeline — concluída")
-    log("tudo pronto: train_results.tar.gz e new_playcount.tar")
+    log("tudo pronto: retrain_outputs.tar")
     return 0
 
 

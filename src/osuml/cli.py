@@ -661,6 +661,38 @@ def cmd_eval_log(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_maintenance(args: argparse.Namespace, settings: Settings) -> int:
+    """Manutenção periódica (0 pedidos à osu!API): o que as tarefas agendadas correm. Ver `osuml/maintenance.py` e `docs/retreino_mensal.md`."""
+    from pathlib import Path
+
+    from . import maintenance as mt
+
+    try:  # a tarefa corre sem consola (pythonw) ou em consolas cp1252
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+    step = args.maintenance_step
+    if step == "dumps-check":
+        out = mt.dumps_check(settings, window_days=args.window_days, force=args.force)
+    elif step == "retrain-plan":
+        out = mt.retrain_plan(settings)
+        if args.prepare and out.get("pending"):
+            out["prepared"] = mt.retrain_prepare(settings, _store(settings))
+    elif step == "status":
+        out = mt.status(settings)
+    else:
+        store = _store(settings)
+        if step == "monthly-sim":
+            out = mt.monthly_sim(settings, store)
+        elif step == "pack-check":
+            out = mt.pack_check(settings, store, upload=args.upload, players=args.players or None)
+        else:  # retrain-finish
+            out = mt.retrain_finish(settings, store, Path(args.outputs), args.snapshot, osu_files=Path(args.osu_files) if args.osu_files else None,
+                                    sample_pct=args.sample_pct)
+    print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
+    return 0 if not (isinstance(out, dict) and out.get("refused")) else 2
+
+
 def cmd_categorize(args: argparse.Namespace, settings: Settings) -> int:
     from .beatmaps.skills import ReferenceScale, SkillScorer
     from .categorize.core import CategorizeController, MapCategorizer
@@ -691,7 +723,7 @@ def cmd_categorize(args: argparse.Namespace, settings: Settings) -> int:
 
 def _handlers() -> dict:
     return {"collect": cmd_collect, "status": cmd_status, "export": cmd_export, "maps": cmd_maps,
-            "sync-s3": cmd_sync_s3, "dump-scores": cmd_dump_scores, "map-catalog": cmd_map_catalog, "analyze": cmd_analyze, "recommend": cmd_recommend, "dump-table": cmd_dump_table, "panel": cmd_panel, "poll": cmd_poll, "categorize": cmd_categorize, "eval-log": cmd_eval_log}
+            "sync-s3": cmd_sync_s3, "dump-scores": cmd_dump_scores, "map-catalog": cmd_map_catalog, "analyze": cmd_analyze, "recommend": cmd_recommend, "dump-table": cmd_dump_table, "panel": cmd_panel, "poll": cmd_poll, "categorize": cmd_categorize, "eval-log": cmd_eval_log, "maintenance": cmd_maintenance}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -752,6 +784,23 @@ def main(argv: list[str] | None = None) -> int:
     ct.add_argument("--reference-version", default="v3", help="pool de referência a usar (omissão: v3)")
     ct.add_argument("--open", action="store_true", help="abre o navegador")
 
+    mt_ = sub.add_parser("maintenance", help="manutenção periódica do recomendador (0 pedidos à osu!API): simulação mensal, dumps novos, pacote S3, retreino")
+    msub = mt_.add_subparsers(dest="maintenance_step", required=True)
+    msub.add_parser("status", help="estado da manutenção (último treino, pedido de retreino, pacote enviado)")
+    msub.add_parser("monthly-sim", help="simula a recalibração (não altera nada) e escreve o relatório do mês em data/reports/manutencao/")
+    dc = msub.add_parser("dumps-check", help="procura um dump novo completo no data.ppy.sh (só na 1.ª semana do mês) e marca o retreino como pendente")
+    dc.add_argument("--window-days", type=int, default=7)
+    dc.add_argument("--force", action="store_true", help="ignora a janela da 1.ª semana")
+    pc = msub.add_parser("pack-check", help="decide se o pacote do S3 está desatualizado; com --upload reconstrói e envia (bucket privado)")
+    pc.add_argument("--upload", action="store_true")
+    pc.add_argument("--players", nargs="*", default=None, help="omissão: os do último pacote (PXD Vieira, gaaGOD)")
+    rp = msub.add_parser("retrain-plan", help="o que enviar ao pod e com que argumentos correr o pipeline")
+    rp.add_argument("--prepare", action="store_true", help="prepara também osuml_src.zip, pod_pipeline.py e api_plays.parquet em data/processed/maintenance/retrain/")
+    rf = msub.add_parser("retrain-finish", help="instala os modelos vindos do pod (valida, reconstrói o índice, recalibra, troca as pastas; guarda as antigas)")
+    rf.add_argument("--outputs", required=True, help="pasta extraída de retrain_outputs.tar (models/, results/, parquet/, catalog/)")
+    rf.add_argument("--snapshot", required=True, help="data do dump novo, AAAA_MM_DD")
+    rf.add_argument("--osu-files", default=None, help="dump *_osu_files.tar.bz2 local (para as etiquetas dos mapas)")
+    rf.add_argument("--sample-pct", type=int, default=50)
     ev = sub.add_parser("eval-log", help="compara previsão e realidade com as jogadas novas (0 pedidos): recomendações jogadas + avaliação-sombra + relatório")
     ev.add_argument("--since", default=None, help="AAAA-MM-DD: recupera o histórico desde esta data (use com --batch day)")
     ev.add_argument("--batch", choices=["new", "day"], default="new", help="new = só o que entrou desde a última avaliação; day = uma passagem por dia (histórico)")

@@ -51,11 +51,12 @@ def _copy_players(store, dest_db: Path, players: list[str]) -> dict[str, Any]:
             dst.execute(m.users.insert().values(user_id=u["user_id"], username=u["username"], playmode=u["playmode"], raw={"username": u["username"]},
                                                 first_seen_at=now, fetched_at=now, request_id=None))
             rows = src.execute(select(m.scores).where(m.scores.c.user_id == u["user_id"])).mappings().all()
-            dst.execute(m.scores.insert(), [{
-                "score_id": r["score_id"], "user_id": r["user_id"], "beatmap_id": r["beatmap_id"], "ruleset_id": r["ruleset_id"],
-                "passed": r["passed"], "accuracy": r["accuracy"], "pp": r["pp"], "mod_acronyms": r["mod_acronyms"], "ended_at": r["ended_at"],
-                "first_source": r["first_source"], "raw": {}, "content_sha256": "", "revision": 1, "first_seen_at": now, "last_seen_at": now}
-                for r in rows])
+            if rows:  # um jogador sem scores não deve rebentar o pacote
+                dst.execute(m.scores.insert(), [{
+                    "score_id": r["score_id"], "user_id": r["user_id"], "beatmap_id": r["beatmap_id"], "ruleset_id": r["ruleset_id"],
+                    "passed": r["passed"], "accuracy": r["accuracy"], "pp": r["pp"], "mod_acronyms": r["mod_acronyms"], "ended_at": r["ended_at"],
+                    "first_source": r["first_source"], "raw": {}, "content_sha256": "", "revision": 1, "first_seen_at": now, "last_seen_at": now}
+                    for r in rows])
             copied[u["username"]] = len(rows)
     out.engine.dispose()
     return copied
@@ -119,6 +120,11 @@ def build_pack(store, index_dir: Path, models_dir: Path, out_zip: Path, players:
             pass
         shutil.rmtree(root / "raw", ignore_errors=True)
         training = _training_summary(training_results)
+        if not training and (models_dir / "training.json").exists():  # resumo já guardado ao instalar o modelo
+            try:
+                training = json.loads((models_dir / "training.json").read_text(encoding="utf-8"))
+            except ValueError:
+                training = None
         if training:
             (root / "models" / "training.json").write_text(json.dumps(training, indent=2, ensure_ascii=False), encoding="utf-8")
         manifest = {"created_at": datetime.now(timezone.utc).isoformat(), "players": copied, "models": [f.name for f in models], "note": note,
