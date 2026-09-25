@@ -659,6 +659,7 @@ jogadores únicos** nos scores aleatórios + 10 000 do top. `top_10000` = 56,6 M
 - **Validação com jogadores da API** (`osuml analyze reach-api-check`, BD local, 0 pedidos; `analysis/reach_api_check.py`): **o modelo novo NÃO é melhor que o
   antigo nestes jogadores** (AUC temporal ≈ 0,72 nos dois; pior nas metades enviesadas) e é **mais conservador** (previsto médio 0,25 vs observado 0,53 em ≥88 %).
   **Ordena bem** (monótono) mas **subestima**: previsto 0,2-0,3 ⇒ observado 0,62; 0,4-0,5 ⇒ 0,71 (temporal, n=2 874, 71 jogadores). Causa provável: a BD só guarda
+<<<<<<< HEAD
   best+recent (viés de seleção) e o nº de passes do perfil é bem menor que nos dumps. Medido também: quando o modelo "esperava" 80-84 %, esses jogadores
   tinham **mediana de 95 % nos passes** e 66 % chegavam a ≥ 88 % (PXD Vieira: esperado 85 %, real 94 %).
 - **Regra do utilizador (2026-09-24): "abaixo de 88 % não se aprende; por volta de 93 % aprende-se" ⇒ nenhuma sugestão pode ter accuracy esperada < 88 %.**
@@ -736,6 +737,10 @@ jogadores únicos** nos scores aleatórios + 10 000 do top. `top_10000` = 56,6 M
   (os que têm plays acompanhados vêm primeiro, `catalog_only` para os restantes) e ficha com atributos reais por mods do `catalog/v2/map_attributes.parquet` (notas 0-100 só sem mods; sem plays). ~0,8 s por pesquisa.
   Pacote atual: `…0e69cefab468-passacc3.zip` (dados corrigidos; substitui `passacc2`).
   falhar — sai com P(passar) 81 %); melhor passe do par é ligeiramente optimista face a uma jogada avulsa. Pod `9s66ow1w5hs1si` (criado porque o `1v…` já não arranca por falta de memória no servidor) **parado**.
+=======
+  best+recent (viés de seleção) e o nº de passes do perfil é bem menor que nos dumps. Por isso **`MIN_REACH_NEW` desceu de 0,40 para 0,30** (observado 0,53-0,66 ⇒
+  "mais provável que não"). Os "≥88 %: X %" mostrados são a probabilidade do modelo (conservadora), não calibrada para a API.
+>>>>>>> 1fd4ed8237a250a90eddb31372b41293d0503fb7
 - **Índice v2** (`data/processed/recommend/index/`, antigo em `index_old25`; modelos antigos em `models_old25`): 152 268 mapas, matriz CF com 34 802 jogadores
   (50 %), 57 M pares, etiquetas 152 268 (130 184 com `set_id`). **Recomendador**: só prevê para candidatos plausíveis (`_predict_all(rows=)`) ⇒ **6 s** (era 29 s com o
   catálogo grande). PXD Vieira/speed: 493 candidatos novos; gaaGOD: 249 (speed +3,6…+4,7, outros eixos abaixo do nível).
@@ -746,7 +751,11 @@ jogadores únicos** nos scores aleatórios + 10 000 do top. `top_10000` = 56,6 M
   impressão digital do modelo (novo `af8fe9c4933d`; antigo `1194cf78e401`) e o resumo do treino (`models/training.json`). **Distribuição** (decisão do utilizador): **código
   público no GitHub; pacote de dados à parte (privado)**, descompactado em `./pack` — dados derivados dos dumps (licença: só análise estatística) **não** vão numa release pública.
   Pacote `dist/osuml-pack.zip` (168 MB; só PXD Vieira + gaaGOD, colunas mínimas, sem JSON cru da API) **enviado ao bucket privado**
+<<<<<<< HEAD
   `s3://osu-ml-skill/recommend/osuml-pack-0e69cefab468-passacc3.zip` (AES256, SHA-256 verificado; **esta é a versão a usar**; `passacc1` = perfil sem forma atual: modelos P(passar)+accuracy se passar; as anteriores `…af8fe9c4933d*.zip` são do modelo `reach`, obsoleto). Testado numa instalação limpa (só código + pacote, sem `data/` nem `.env`).
+=======
+  `s3://osu-ml-skill/recommend/osuml-pack-af8fe9c4933d.zip` (AES256, SHA-256 verificado `b0e37d9c…`). Testado numa instalação limpa (só código + pacote, sem `data/` nem `.env`).
+>>>>>>> 1fd4ed8237a250a90eddb31372b41293d0503fb7
   Falta: o bloqueio de acesso público do bucket não se conseguiu verificar (IAM sem permissão) — confirmar na consola AWS.
 - **Credenciais AWS estão no `.env`** (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`): o `boto3` só as vê depois de `Settings.from_env` carregar o `.env`; um teste feito
   fora disso deu falso negativo. Painel: a estimativa de tempo usa a **velocidade dos últimos 3 min** (a média desde o início enganava quando havia uma fase inicial sem passos).
@@ -789,7 +798,11 @@ Tabelas: `runs`, `api_requests`, `users`, `scores` (PK `score_id`), `score_obser
 
 ## Convenções
 
+<<<<<<< HEAD
 - Correr `pytest` antes de dar uma alteração por concluída (223 testes, 1 só corre em Linux; todos devem passar).
+=======
+- Correr `pytest` antes de dar uma alteração por concluída (175 testes, 1 só corre em Linux; todos devem passar).
+>>>>>>> 1fd4ed8237a250a90eddb31372b41293d0503fb7
   Testes nunca fazem pedidos reais: usar `httpx.MockTransport`.
 - **Nunca apagar `data/raw/`**. Respostas raw são gravadas antes de normalizar.
 - Datas guardadas em UTC *naive*.
