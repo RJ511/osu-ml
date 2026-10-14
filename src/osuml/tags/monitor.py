@@ -17,7 +17,7 @@ from ..storage.database import Store, utcnow
 from .collect import AMBER_PAIN, HIGH_PAIN, PRESSURE_INTERVAL_S
 from .queue import queue_counts, tags_today
 
-DAILY_CAP = 1000
+from .collect import DEFAULT_DAILY_CAP as DAILY_CAP  # um só valor para o teto diário
 SLOW_MS = 1500            # latência média acima disto = sinal de carga
 GUARD_COOLDOWN_S = 30.0   # entre verificações manuais do guard
 GUARD_STALE_S = 6 * 3600  # um estado de guard mais antigo que isto aparece como "desatualizado"

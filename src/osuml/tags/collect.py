@@ -36,6 +36,7 @@ SOURCES = {"raw": "hinai_raw", "details": "hinai"}   # fonte guardada com cada s
 DEFAULT_ENDPOINT = "raw"  # `/v3/osu/beatmaps/s/{id}`: servido localmente pelo mirror para ranked/loved (gravação: votos ~80 % dos atuais);
 #                           "details" = `/v3/osu/beatmaps/s/{id}/details` (votos iguais aos da osu!API, mas origem local não confirmada)
 MIN_INTERVAL_S = 1.0
+DEFAULT_DAILY_CAP = 3000          # teto diário de sets recolhidos ao mirror (aprovado pelo utilizador a 2026-10-14; antes 1000)
 GUARD_CHECK_EVERY = 25
 GUARD_RETRY_S = 120          # `thresholds.retry_after_s` do guard
 AMBER_PAIN = 2               # semáforo: dor >= 2 ⇒ âmbar (2 s por pedido)
@@ -190,7 +191,7 @@ class TagCollector:
                                  f"tags: {out['ok']} sets · {out['not_found']} sem set" + (f" — {out['aborted']}" if out["aborted"] else ""))
         return out
 
-    def run_session(self, *, daily_cap: int = 1000, max_minutes: float = 110.0, batch: int = GUARD_CHECK_EVERY, max_wait_guard_s: float = 1800.0,
+    def run_session(self, *, daily_cap: int = DEFAULT_DAILY_CAP, max_minutes: float = 110.0, batch: int = GUARD_CHECK_EVERY, max_wait_guard_s: float = 1800.0,
                     paused_fn: Callable[[], bool] | None = None, trigger: str = "scheduled") -> dict[str, Any]:
         """Sessão contínua guiada pelo semáforo do guard: enquanto estiver verde/âmbar continua (âmbar = metade do ritmo),
         em vermelho espera e volta a consultar; termina por fila vazia, teto diário, pausa, tempo máximo ou paragem por erros/pressão.
@@ -245,7 +246,7 @@ class TagCollector:
             prog.finish("error" if aborted else "done", f"tags: {done} sets nesta sessão" + (f" — {aborted}" if aborted else (f" — {skipped}" if skipped else "")))
         return out
 
-    def run_queue(self, *, max_sets: int = 100, daily_cap: int = 1000, max_wait_guard_s: float = 1800.0, paused: bool = False,
+    def run_queue(self, *, max_sets: int = 100, daily_cap: int = DEFAULT_DAILY_CAP, max_wait_guard_s: float = 1800.0, paused: bool = False,
                   trigger: str = "manual") -> dict[str, Any]:
         """Uma execução sobre a fila (fases B→C→A): respeita pausa, teto diário e guard; regista-se em `tag_runs`."""
         from .queue import next_batch, tags_today

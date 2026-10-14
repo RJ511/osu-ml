@@ -921,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     tsub.add_parser("guard", help="1 pedido ao guard do mirror e regista o estado")
     tr = tsub.add_parser("run", help="uma execução sobre a fila (respeita pausa, teto diário e guard)")
     tr.add_argument("--max-sets", type=int, default=100)
-    tr.add_argument("--daily-cap", type=int, default=1000)
+    tr.add_argument("--daily-cap", type=int, default=3000)
     tr.add_argument("--interval", type=float, default=1.0)
     tr.add_argument("--wait-guard-min", type=float, default=30.0)
     tr.add_argument("--max-start-delay", type=int, default=0, help="jitter aleatório (s) antes de começar")
