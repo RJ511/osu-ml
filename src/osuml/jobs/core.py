@@ -26,6 +26,9 @@ from typing import Any, Callable
 
 STALE_AFTER_S = 120
 
+# o painel corre com pythonw (sem consola): sem esta flag o Windows abre uma janela por cada ssh/taskkill
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
 
 def pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
@@ -49,7 +52,7 @@ def pid_alive(pid: int | None) -> bool:
 
 def kill_tree(pid: int) -> None:
     if os.name == "nt":  # nunca os.kill no Windows: termina o processo à força
-        subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, timeout=15)
+        subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, timeout=15, **NO_WINDOW)
     else:
         os.kill(pid, signal.SIGTERM)
 
@@ -115,7 +118,7 @@ def ssh_argv(entry: dict[str, Any], remote_cmd: str) -> list[str]:
 
 def _run_ssh(argv: list[str], timeout: float = 25) -> tuple[int, str, str]:
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, **NO_WINDOW)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 255, "", "SSH sem resposta"

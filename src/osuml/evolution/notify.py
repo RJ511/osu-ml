@@ -109,8 +109,10 @@ def check_events(notifier: Notifier, state: dict[str, Any], today: date | None =
     played_today = today.isoformat() in (cons.get("this_week") or [])
     days, goal = cons.get("this_week_days", 0), cons.get("weekly_days_goal", 3)
     wd = today.weekday()
-    # 1) lembrete de sessão (ao fim do dia, se hoje ainda não jogaste e a meta da semana não está cumprida)
-    if week.get("status") == "ready" and not played_today and days < goal and 17 <= now.hour < 22:
+    # 1) lembrete de sessão (dias úteis 19-22 h, fim de semana 9-22 h; se hoje ainda não jogaste e a meta da semana não está cumprida)
+    weekend = wd >= 5
+    in_window = (9 <= now.hour < 22) if weekend else (19 <= now.hour < 22)  # semana: depois das 19 h; fim de semana: quando apetecer (de manhã até às 22 h)
+    if week.get("status") == "ready" and not played_today and days < goal and in_window:
         nxt = next((s for s in week["sessions"] if s["progress"]["done"] < s["progress"]["total"]), None)
         if nxt:
             add(f"session:{today.isoformat()}", f"Sessão {nxt['key']} · {nxt['title']}",

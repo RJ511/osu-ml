@@ -19,9 +19,9 @@ def state(days=0, this_week=(), streak=2, ready=True, stale=False, rival_pp=None
 
 def test_session_reminder_only_in_the_evening_once_per_day_and_never_when_played_today(tmp_path):
     n = Notifier(tmp_path / "n.json", ntfy_url="")
-    assert check_events(n, state(), DAY, datetime(2026, 10, 15, 12, 0)) == []  # cedo demais
-    assert check_events(n, state(), DAY, datetime(2026, 10, 15, 18, 0)) == ["session:2026-10-15"]
-    assert check_events(n, state(), DAY, datetime(2026, 10, 15, 19, 0)) == []  # já avisado
+    assert check_events(n, state(), DAY, datetime(2026, 10, 15, 18, 0)) == []  # antes das 19 h
+    assert check_events(n, state(), DAY, datetime(2026, 10, 15, 19, 0)) == ["session:2026-10-15"]
+    assert check_events(n, state(), DAY, datetime(2026, 10, 15, 20, 0)) == []  # já avisado
     n2 = Notifier(tmp_path / "n2.json", ntfy_url="")
     assert check_events(n2, state(this_week=["2026-10-15"], days=1), DAY, datetime(2026, 10, 15, 18, 0)) == []  # já jogaste hoje
 
@@ -81,3 +81,10 @@ def test_live_calibrator_runs_only_when_the_database_changed(tmp_path, monkeypat
     out = live.run_once()
     assert out is not None and calls == ["eval", "adj"] and live.run_once() is None
     assert live.run_once(force=True) is not None and calls == ["eval", "adj", "eval", "adj"]
+
+
+def test_weekend_reminder_is_allowed_in_the_morning(tmp_path):
+    n = Notifier(tmp_path / "w.json", ntfy_url="")
+    sat = date(2026, 10, 17)
+    assert check_events(n, state(days=3), sat, datetime(2026, 10, 17, 8, 0)) == []
+    assert any(k.startswith("session:") for k in check_events(n, state(days=2), sat, datetime(2026, 10, 17, 10, 0)))
