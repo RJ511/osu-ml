@@ -22,6 +22,10 @@ MIN_EVIDENCE = 5            # jogadas mínimas na janela para mostrar um nível
 TREND_WEEKS = 4             # compara com o nível de há 4 semanas
 TREND_THRESHOLD = 1.5       # pontos da escala 0-100+ abaixo dos quais é "estável" (ruído)
 STALE_DAYS = 3
+RIVAL_INACTIVE_DAYS = 14   # um rival que não joga há mais tempo deixa de ser alvo
+RIVAL_REACHED = 0.98       # já tens ≥ 98 % dos pp dele: alcançado, escolhe-se outro
+RIVAL_HOLD_DAYS = 21       # mínimo entre trocas "por melhor candidato" (evita oscilar)
+RIVAL_BETTER = 0.7         # o candidato tem de estar a ≤ 70 % da distância de perfil do rival atual
 
 
 def _quantile(vals: list[float], q: float) -> float:
@@ -53,6 +57,7 @@ class Evolution:
         self.notifier, self.recommender, self.checker, self.live = notifier, recommender, checker, live
         self.weekly = weekly  # evolution.weekly.WeeklyPlanner (teste semanal + sessões); opcional
         self.goal_path = Path(goal_path)
+        self.rival_path = self.goal_path.parent / "rival.json"
         self._today = today or date.today
 
     def goal(self) -> dict[str, Any]:
@@ -131,8 +136,10 @@ class Evolution:
             "days_since_last": (today - last).days if last else None,
         }
 
-    def rival(self, me: dict[str, Any], my_levels: dict[str, float | None]) -> dict[str, Any] | None:
-        """Jogador acompanhado, com mais pp, de perfil mais parecido (distância nos 4 eixos)."""
+    def rival(self, me: dict[str, Any], my_levels: dict[str, float | None], exclude: set[int] | None = None,
+              active: dict[int, date] | None = None, today: date | None = None) -> dict[str, Any] | None:
+        """Jogador acompanhado, com mais pp, de perfil mais parecido (distância nos 4 eixos). `exclude` = ex-rivais já alcançados;
+        `active` (user_id → última jogada) tira os que não jogam há mais de RIVAL_INACTIVE_DAYS."""
         if not me.get("pp") or any(my_levels.get(a) is None for a in AXES):
             return None
         best, best_d = None, None
@@ -140,6 +147,12 @@ class Evolution:
             r = p.get("ratings") or {}
             if p["user_id"] == me["user_id"] or not p.get("pp") or p["pp"] <= me["pp"] or not p.get("confident"):
                 continue
+            if exclude and p["user_id"] in exclude:
+                continue
+            if active is not None and today is not None:
+                last = active.get(p["user_id"])
+                if last is None or (today - last).days > RIVAL_INACTIVE_DAYS:
+                    continue
             if any(r.get(f"{a}_rating") is None for a in AXES):
                 continue
             dist = math.sqrt(sum((r[f"{a}_rating"] - my_levels[a]) ** 2 for a in AXES))
@@ -234,6 +247,7 @@ class Evolution:
             "rank_history": (raw.get("rank_history") or {}).get("data", []),
             "rival": self._rival_with_detail({**me, "user_id": int(uid), "pp": pp_now}, levels, plays, today),
             "week": self._week(int(uid), plays, goal, today),
+            "projection": self._projection(pp_now, target_pp, series, cons),
             "data_quality": {"stale": stale, "last_check": (data.get("check") or {}).get("last_check_at"),
                              "plays_in_window": n_recent, "window_weeks": WINDOW_WEEKS},
         }
@@ -303,11 +317,113 @@ class Evolution:
         except Exception as exc:  # a semana de treino é um extra: nunca pode deitar a página abaixo
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"[:200]}
 
+    def _last_played(self) -> dict[int, date] | None:
+        """Última jogada guardada de cada jogador (para saber quem está ativo); None sem BD."""
+        try:
+            from sqlalchemy import func, select
+
+            from ..storage import models as m
+
+            with self.explorer.store.engine.connect() as c:
+                rows = c.execute(select(m.scores.c.user_id, func.max(m.scores.c.ended_at)).group_by(m.scores.c.user_id)).all()
+            return {int(u): d for u, e in rows if (d := _day(e))}
+        except Exception:  # noqa: BLE001 - sem BD (testes): trata todos como ativos
+            return None
+
+    def _rival_state(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.rival_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _save_rival_state(self, st: dict[str, Any]) -> None:
+        try:
+            self.rival_path.parent.mkdir(parents=True, exist_ok=True)
+            self.rival_path.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def dynamic_rival(self, me: dict[str, Any], levels: dict[str, Any], today: date) -> dict[str, Any] | None:
+        """Rival que se reavalia sozinho: mantém-se enquanto fizer sentido e muda quando é alcançado, deixa de jogar ou
+        aparece um candidato bem mais parecido (no máximo de 21 em 21 dias). Guarda o histórico em `rival.json`."""
+        st = self._rival_state()
+        active = self._last_played()
+        history = st.get("history", [])
+        exclude = {int(h["user_id"]) for h in history if h.get("reason") == "alcançado"}
+        profiles = {p["user_id"]: p for p in self.explorer._profiles()}
+        cur = st.get("current")
+        reason = None
+        if cur:
+            pr = profiles.get(cur["user_id"])
+            last = (active or {}).get(cur["user_id"])
+            if pr is None or not pr.get("pp"):
+                reason = "sem dados"
+            elif me.get("pp") and me["pp"] >= pr["pp"] * RIVAL_REACHED:
+                reason = "alcançado"
+            elif active is not None and (last is None or (today - last).days > RIVAL_INACTIVE_DAYS):
+                reason = "parou de jogar"
+        cand = self.rival(me, levels, exclude=exclude | ({cur["user_id"]} if reason else set()), active=active, today=today)
+        changed = None
+        if cur is None or reason:
+            if cand is not None:
+                changed = reason or "primeiro rival"
+        elif cand is not None and cand["user_id"] != cur["user_id"]:
+            held = (today - date.fromisoformat(cur["since"])).days
+            r = (profiles[cur["user_id"]].get("ratings")) or {}
+            ok = all(r.get(f"{a}_rating") is not None and levels.get(a) is not None for a in AXES)
+            cur_d = math.sqrt(sum((r[f"{a}_rating"] - levels[a]) ** 2 for a in AXES)) if ok else None
+            if held >= RIVAL_HOLD_DAYS and cur_d and cand["distance"] <= RIVAL_BETTER * cur_d:
+                changed = reason = "candidato mais parecido"
+        if changed:
+            if cur:
+                history.append({"user_id": cur["user_id"], "username": cur.get("username"), "since": cur["since"], "until": today.isoformat(), "reason": reason or changed})
+            cur = {"user_id": cand["user_id"], "username": cand["username"], "since": today.isoformat(), "pp_at_pick": cand["pp"], "my_pp_at_pick": me.get("pp")}
+            st = {"current": cur, "history": history[-10:]}
+            self._save_rival_state(st)
+            if self.notifier is not None and history and changed != "primeiro rival":
+                try:
+                    self.notifier.add(f"rival_new:{cand['user_id']}:{today.isoformat()}", f"Novo rival: {cand['username']}",
+                                      f"{history[-1]['username']} deixou de ser alvo ({history[-1]['reason']}). {cand['username']} tem {cand['pp']:.0f} pp.")
+                except Exception:  # noqa: BLE001
+                    pass
+        if cur is None:
+            return None
+        pr = profiles.get(cur["user_id"])
+        if pr is None or not pr.get("ratings") or any(pr["ratings"].get(f"{a}_rating") is None for a in AXES) or any(levels.get(a) is None for a in AXES):
+            return None
+        r = pr["ratings"]
+        dist = math.sqrt(sum((r[f"{a}_rating"] - levels[a]) ** 2 for a in AXES))
+        return {"user_id": pr["user_id"], "username": pr["username"], "pp": pr["pp"], "global_rank": pr["global_rank"], "distance": round(dist, 1),
+                "axes": {a: {"them": round(r[f"{a}_rating"], 1), "me": levels[a], "gap": round(r[f"{a}_rating"] - levels[a], 1)} for a in AXES},
+                "since": cur["since"], "days_as_rival": (today - date.fromisoformat(cur["since"])).days,
+                "pp_gap": round(pr["pp"] - me["pp"], 1) if me.get("pp") else None,
+                "pp_gap_at_pick": round(cur["pp_at_pick"] - cur["my_pp_at_pick"], 1) if cur.get("my_pp_at_pick") and cur.get("pp_at_pick") else None,
+                "history": st.get("history", history)[-3:]}
+
     def _rival_with_detail(self, me: dict[str, Any], levels: dict[str, Any], plays: list[dict[str, Any]], today: date):
-        rv = self.rival(me, levels)
+        rv = self.dynamic_rival(me, levels, today)
         if rv is not None:
             rv["detail"] = self.rival_detail(rv["user_id"], levels, plays, today)
         return rv
+
+    # ------------------------------------------------------------------ projeção da meta
+    def projection(self, pp_now: float | None, target_pp: float | None, series: dict[str, list[dict[str, Any]]], cons: dict[str, Any]) -> dict[str, Any]:
+        from .projection import fit_pp_vs_level, mean_level_series, project
+
+        pts = []
+        for p in self.explorer._profiles():
+            r = p.get("ratings") or {}
+            if p.get("confident") and p.get("pp") and all(r.get(f"{a}_rating") is not None for a in AXES):
+                pts.append((sum(r[f"{a}_rating"] for a in AXES) / len(AXES), float(p["pp"])))
+        active_weeks = [w["days"] for w in cons["weeks"] if w["days"] > 0]
+        days_hist = sum(active_weeks) / len(active_weeks) if active_weeks else None
+        return project(pp_now, target_pp, fit_pp_vs_level(pts), mean_level_series({a: series[a] for a in AXES}, AXES), days_hist)
+
+    def _projection(self, pp_now: Any, target_pp: Any, series: Any, cons: Any) -> dict[str, Any]:
+        try:
+            return self.projection(pp_now, target_pp, series, cons)
+        except Exception as exc:  # noqa: BLE001 - extra: nunca deita a página abaixo
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:160]}
 
     def _user_raw(self, user_id: int) -> dict[str, Any]:
         from sqlalchemy import select

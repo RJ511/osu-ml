@@ -79,3 +79,55 @@ def test_rival_detail_picks_unplayed_nomod_maps_in_reach_sorted_by_pp(tmp_path):
     d = ev.rival_detail(9, {"aim": 70.0, "speed": 70.0, "stamina": 70.0, "reading": 70.0}, [{"beatmap_id": 6}], date(2026, 10, 14))
     assert [m["beatmap_id"] for m in d["maps"]] == [1, 2]  # 3 demasiado difícil, 4 com DT, 5 acc baixa, 6 já jogado
     assert d["maps"][0]["gaps"]["aim"] == 2.0 and d["maps_total"] == 3
+
+
+def test_projection_math_fit_slope_and_scenarios():
+    from osuml.evolution import projection as pj
+
+    pts = [(x, 1000 * 2.718281828 ** (0.07 * x)) for x in range(40, 80, 2)]
+    fit = pj.fit_pp_vs_level(pts)
+    assert abs(fit["b"] - 0.07) < 1e-6 and fit["r2"] > 0.999 and pj.fit_pp_vs_level(pts[:5]) is None
+    assert pj.months_to_target(1000, 2000, 0.07, 1.0) == pj.months_to_target(1000, 2000, 0.07, 1.0) and abs(pj.months_to_target(1000, 2000, 0.07, 1.0) - 9.9) < 0.1
+    assert pj.months_to_target(1000, 2000, 0.07, 0.0) == float("inf") and pj.months_to_target(2500, 2000, 0.07, 1.0) == 0.0
+    ts = pj.theil_sen([float(i) for i in range(8)], [50 + 0.5 * i for i in range(8)])
+    assert abs(ts[0] - 0.5) < 1e-9 and pj.theil_sen([1.0, 2.0], [1.0, 2.0]) is None
+    up = pj.project(2000, 4000, fit, [(i, 60 + 0.5 * i) for i in range(10)], 3.0)  # ~2,2 pts/mês observados
+    assert up["ok"] and up["scenarios"] and up["scenarios"][2]["days"] == 5 and up["scenarios"][2]["per_month"] > up["scenarios"][0]["per_month"]
+    assert up["scenarios"][2]["p"]["60"] >= up["scenarios"][0]["p"]["60"]
+    flat = pj.project(2000, 4000, fit, [(i, 60 - 0.01 * i) for i in range(10)], 3.0)
+    assert flat["stagnant"] and flat["scenarios"] == [] and flat["needed"]["level_points"] > 0 and flat["what_if"][0]["months"] > flat["what_if"][-1]["months"]
+    assert pj.project(2000, 4000, fit, [(0, 60.0)], 3.0)["observed"] is None
+
+
+class _RivalExplorer:
+    def __init__(self, profs):
+        self.profs = profs
+
+    def _profiles(self):
+        return self.profs
+
+
+def _prof(uid, pp, base):
+    return {"user_id": uid, "username": f"u{uid}", "pp": pp, "global_rank": 1000 * uid, "confident": True,
+            "ratings": {f"{a}_rating": base for a in ("aim", "speed", "stamina", "reading")}}
+
+
+def test_dynamic_rival_keeps_switches_when_reached_or_inactive_and_avoids_flapping(tmp_path):
+    from datetime import date, timedelta
+
+    me = {"user_id": 1, "pp": 4000}
+    lv = {a: 50.0 for a in ("aim", "speed", "stamina", "reading")}
+    day = date(2026, 10, 14)
+    ex = _RivalExplorer([_prof(1, 4000, 50), _prof(2, 4400, 52), _prof(3, 4500, 60)])
+    ev = Evolution(ex, tmp_path / "g.json", today=lambda: day)
+    assert ev.dynamic_rival(me, lv, day)["user_id"] == 2  # o mais parecido
+    ex.profs[2] = _prof(3, 4500, 51)  # aparece alguém ligeiramente mais parecido: mantém (não oscila e não passaram 21 dias)
+    assert ev.dynamic_rival(me, lv, day + timedelta(days=5))["user_id"] == 2
+    assert ev.dynamic_rival({"user_id": 1, "pp": 4390}, lv, day + timedelta(days=6))["user_id"] == 3  # alcançou o rival: troca
+    hist = ev._rival_state()["history"]
+    assert hist[-1]["user_id"] == 2 and hist[-1]["reason"] == "alcançado"
+    ev2 = Evolution(ex, tmp_path / "g.json", today=lambda: day)
+    ev2._last_played = lambda: {2: day, 3: day - timedelta(days=30), 1: day, 4: day}  # o rival atual parou de jogar
+    ex.profs.append(_prof(4, 4600, 55))
+    out = ev2.dynamic_rival({"user_id": 1, "pp": 4000}, lv, day)
+    assert out["user_id"] == 4 and ev2._rival_state()["history"][-1]["reason"] == "parou de jogar"

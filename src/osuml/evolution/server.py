@@ -121,6 +121,7 @@ function tabProgresso(app,s){
  const cc=$("div","card span2");cc.appendChild($("h2","","Consistência"));
  const bars=$("div","bars");c.weeks.forEach(w=>{const i=$("i",w.met?"met":(w.days>0?"part":""));i.style.height=Math.max(8,w.days/7*100)+"%";i.title=`${w.week}: ${w.days} dias`;bars.appendChild(i)});
  cc.appendChild(bars);cc.appendChild($("div","note",`Últimas 12 semanas (verde = meta de ${c.weekly_days_goal} dias cumprida).`));app.appendChild(cc);
+ projCard(app,s);
  const ac=$("div","card span2");ac.appendChild($("h2","",`Nível por eixo (janela de ${q.window_weeks} semanas)`));
  const grid=$("div","axes");
  AX.forEach(([k,label,col])=>{const t=s.trends[k],lv=s.levels[k],a=$("div","ax");a.style.setProperty("--c",`var(${col})`);
@@ -129,6 +130,22 @@ function tabProgresso(app,s){
   a.appendChild($("div","tr "+t.direction,`${ARROW[t.direction]} ${TXT[t.direction]}${t.delta!=null?` (${t.delta>0?"+":""}${n1(t.delta)} em 4 sem.)`:""}`));
   a.appendChild(spark(s.series[k],getComputedStyle(document.documentElement).getPropertyValue(col).trim()||"#888"));grid.appendChild(a)});
  ac.appendChild(grid);ac.appendChild($("div","note",(s.goal.measured_at?`Meta medida em ${s.goal.measured_at} (muda com o tempo). `:"")+(nt0.push?"Avisos também no telemóvel (ntfy). ":"Avisos só nesta página (ntfy desligado). ")+`Só conta passes com accuracy ≥ 90 %. Variações abaixo de 1,5 pontos são ruído ("estável"). Jogadas na janela: ${q.plays_in_window}.`));app.appendChild(ac)}
+const mo=v=>v==null?"—":(v>=120?">10 anos":v>=24?`${(v/12).toFixed(1).replace(".",",")} anos`:`${n1(v)} meses`);
+function projCard(app,s){
+ const P=s.projection,g=s.goal,c=$("div","card span2");c.appendChild($("h2","","Projeção para a meta"));
+ if(!P||!P.ok){c.appendChild($("div","sub",(P&&P.reason)||"Projeção indisponível."));app.appendChild(c);return}
+ const nd=P.needed;c.appendChild($("div","sub",`${g.label}: faltam ${n0(g.gap_pp)} pp. Pela relação medida nos 75 jogadores acompanhados (nível médio → pp), isso corresponde a subir cerca de ${n1(nd.level_points)} pontos de nível médio nos 4 eixos.`));
+ const need=$("div","row");need.append($("span","big",`+${n1(nd.level_points)}`),$("span","sub",`pontos precisos · ${n1(nd.per_month["12"])}/mês em 1 ano · ${n1(nd.per_month["24"])}/mês em 2 anos · ${n1(nd.per_month["60"])}/mês em 5`));c.appendChild(need);
+ const ob=P.observed;
+ if(!ob)c.appendChild($("div","note",P.reason||"Ritmo atual não medível."));
+ else{const st=ob.per_month<=0.05;
+  c.appendChild($("div","sub",`Ritmo medido nas últimas ${ob.weeks_used} semanas com dados: ${ob.per_month>0?"+":""}${n1(ob.per_month)} ± ${n1(ob.se_month)} pontos/mês${ob.days_per_week?` (a ${n1(ob.days_per_week)} dias/semana)`:""}.`));
+  if(P.stagnant||st)c.appendChild($("div","banner","A este ritmo não chegas à meta: o nível médio está parado (inclui a pausa recente). O que conta é o ritmo necessário acima.")) }
+ if(P.scenarios&&P.scenarios.length){const tb=document.createElement("table"),h=document.createElement("tr");["Dias/sem.","Pts/mês","12 m","24 m","60 m","Mediana"].forEach(x=>h.appendChild($("th","",x)));tb.appendChild(h);
+  P.scenarios.forEach(r=>{const t=document.createElement("tr");t.append($("td","",String(r.days)),$("td","mono",n1(r.per_month)),...["12","24","60"].map(k=>$("td","mono",Math.round(r.p[k]*100)+" %")),$("td","mono",r.median_months==null?"—":mo(r.median_months)));tb.appendChild(t)});c.appendChild(tb)}
+ if(P.what_if&&P.what_if.length){c.appendChild($("div","note","E se subires… (cenário, sem probabilidade): "+P.what_if.map(w=>`${n1(w.per_month)} pts/mês → ${mo(w.months)}`).join(" · ")))}
+ c.appendChild($("div","note",`Limites: a ponte nível→pp é uma associação entre jogadores (R² ${n1(P.fit.r2*100)}%), não prova causal; o ritmo vem de poucas semanas; a meta (100.º de PT) também sobe com o tempo. Não há histórico de pp para estimar um ritmo típico de outros jogadores.`));
+ app.appendChild(c)}
 function tabRival(app,s){
  const rv=s.rival,rc=$("div","card span2");rc.appendChild($("h2","","Rival"));
  if(!rv){rc.appendChild($("div","sub","Ainda sem rival: faltam níveis fiáveis nos 4 eixos."));app.appendChild(rc);return}
@@ -136,7 +153,11 @@ function tabRival(app,s){
  const tb=document.createElement("table"),th=document.createElement("tr");["Eixo","Tu","Ele","Diferença"].forEach(h=>th.appendChild($("th","",h)));tb.appendChild(th);
  AX.forEach(([k,label])=>{const x=rv.axes[k],tr2=document.createElement("tr");
   tr2.append($("td","",label),$("td","mono",n1(x.me)),$("td","mono",n1(x.them)),$("td","mono gap "+(x.gap>0?"pos":"neg"),(x.gap>0?"+":"")+n1(x.gap)));tb.appendChild(tr2)});
- rc.appendChild(tb);rc.appendChild($("div","note","Diferença positiva (vermelho) = onde ele está à frente."));app.appendChild(rc);
+ rc.appendChild(tb);rc.appendChild($("div","note","Diferença positiva (vermelho) = onde ele está à frente."));
+ const gp=rv.pp_gap,g0=rv.pp_gap_at_pick;
+ rc.appendChild($("div","note",`Rival há ${rv.days_as_rival} dia(s)${gp!=null?` · diferença de pp: ${n0(gp)}${g0!=null?` (era ${n0(g0)} quando foi escolhido)`:""}`:""}. Muda sozinho se o alcançares, se ele deixar de jogar (14 dias) ou se aparecer alguém bem mais parecido (no máximo de 3 em 3 semanas).`));
+ if(rv.history&&rv.history.length)rc.appendChild($("div","note","Anteriores: "+rv.history.map(h=>`${h.username} (${h.reason}, até ${h.until})`).join(" · ")));
+ app.appendChild(rc);
  if(rv.detail&&rv.detail.maps)rivalDetail(app,rv)}
 const ml=id=>"https://osu.ppy.sh/beatmaps/"+id,acc=v=>(v*100).toFixed(1).replace(".",",")+" %";
 function mapRow(m,chips){const r=$("div","map"),a=$("a","t",m.map);a.href=ml(m.beatmap_id);a.target="_blank";a.rel="noopener";r.appendChild(a);
