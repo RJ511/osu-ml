@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from ..analysis.profile_form import ages_in_days, best_pass_per_map, build_profile
+from .modsview import CatalogLookup, build_view, mods_state, normalize_mods, player_limits
+from .ppgain import (AMBITIOUS_MIN_GAIN, AMBITIOUS_MIN_PASS, AMBITIOUS_SHARE, DEFAULT_FOCUS, FOCUS_WEIGHT, MAX_AXIS_SHARE, PpPredictor, marginal_gain,
+                     player_best_pp, replace_gain, total_pp)
 
 TAB, NL, CR = chr(9), chr(10), chr(13)
 
@@ -198,7 +201,8 @@ class PlayerData:
 
 class Recommender:
     def __init__(self, store, index_dir: Path, models_dir: Path, *, predictor: Predictor | None = None, index: dict | None = None,
-                 cf: tuple | None = None, feedback_file: Path | None = None, profile_mode: str = "form", log_predictions: bool = False) -> None:
+                 cf: tuple | None = None, feedback_file: Path | None = None, profile_mode: str = "form", log_predictions: bool = False,
+                 views: dict | None = None) -> None:
         self.log_predictions = log_predictions  # grava cada sugestão em `prediction_log` (recommend/log.py)
         self.profile_mode = profile_mode  # "form" (recência + esforço, ver analysis/profile_form.py) | "recency" | "base" (perfil de treino, sem pesos)
         self.store, self.index_dir, self.models_dir = store, Path(index_dir), Path(models_dir)
@@ -207,6 +211,59 @@ class Recommender:
         self._lock = threading.Lock()
         self._cache: dict[int, tuple[float, Any, Any]] = {}
         self._adjust: dict[int, dict[str, Any]] | None = None  # correção por jogador (recommend/adjust.py), lida de models/player_adjust.json
+        self._pp: PpPredictor | None = None  # pp oficial esperado (recommend/ppgain.py), carregado a pedido
+        self._views: dict[str, dict] = dict(views or {})  # vistas por mods ("DT": recommend/modsview.py), construídas a pedido
+
+    def _mods_view(self, mods: str) -> dict | None:
+        """Vista dos mapas com esses mods (features efetivas alinhadas com o índice); None se faltar o catálogo ou a pool de referência."""
+        if mods in self._views:
+            return self._views[mods]
+        import json
+
+        catalog = self.index_dir.parents[1] / "catalog" / "v2" / "map_attributes.parquet"
+        try:
+            pool = Path(json.loads((self.index_dir / "meta.json").read_text(encoding="utf-8"))["reference_pool"])
+            if not catalog.exists() or not pool.exists():
+                return None
+            self._views[mods] = build_view(catalog, self._index["ids"], pool, mods)
+        except Exception:
+            return None
+        return self._views[mods]
+
+    def _limits(self, user_id: int, mods: str) -> dict | None:
+        """Limites pessoais medidos nos passes do jogador (AR efetivo máx. e tecto de estrelas com esses mods); None se faltar o catálogo."""
+        catalog = self.index_dir.parents[1] / "catalog" / "v2" / "map_attributes.parquet"
+        if not catalog.exists():
+            return None
+        if getattr(self, "_lookup", None) is None:
+            self._lookup = CatalogLookup(catalog)
+        return player_limits(self.store, user_id, self._lookup, mods)
+
+    def _mods_cal(self, mods: str) -> dict | None:
+        import json
+
+        f = self.models_dir / f"calibration_{mods.lower().replace(',', '_')}.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+    def _mods_adjust(self, mods: str, p, acc):
+        """Ajuste global de P(passar) (logit: a + b·logit p) e da accuracy (deslocamento) medido com jogadas dos jogadores da API com esses mods (`calibration_<mods>.json`)."""
+        import json
+
+        import numpy as np
+
+        cal = self._mods_cal(mods)
+        if cal is None:
+            return p, acc, None
+        a, b = float(cal["pass"]["a"]), float(cal["pass"]["b"])
+        q = np.clip(p, 1e-6, 1 - 1e-6)
+        p2 = 1.0 / (1.0 + np.exp(-(a + b * np.log(q / (1 - q)))))
+        return p2.astype(np.float32), np.clip(acc + float(cal["acc_shift"]), 0.0, 1.0).astype(np.float32), cal
+
+    def _pp_model(self) -> PpPredictor | None:
+        """Preditor do pp oficial, se existir `models/pp_official.txt` e o catálogo de atributos; senão o foco em pp fica desligado."""
+        if self._pp is None:
+            self._pp = PpPredictor(self.models_dir, self.index_dir.parents[1] / "catalog" / "v2" / "map_attributes.parquet")
+        return self._pp if self._pp.available() else None
 
     # ------------------------------------------------------------------ carga
     def ready(self) -> tuple[bool, str]:
@@ -338,14 +395,14 @@ class Recommender:
         return PlayerData(user_id, name, profile, levels, played, best, int(passed.sum()), notes)
 
     # -------------------------------------------------------------- previsões
-    def _predict_all(self, pdata: PlayerData, rows=None):
+    def _predict_all(self, pdata: PlayerData, rows=None, x=None):
         """{p_pass, p_pass_raw, acc, acc_raw}: arrays (n_mapas,). `rows` (índices do catálogo) limita a previsão aos candidatos plausíveis
         (com 150 mil mapas prever tudo demora); as restantes linhas ficam a 0 (nunca são candidatas)."""
         import numpy as np
 
         from ..analysis import pass_model as pm
 
-        x = self._index["x"]
+        x = self._index["x"] if x is None else x
         n = len(x)
         rows = np.arange(n) if rows is None else np.asarray(rows)
         xs = x[rows]
@@ -403,8 +460,17 @@ class Recommender:
         return (order / max(n - 1, 1)).astype(np.float32)
 
     # ------------------------------------------------------------ recomendar
-    def recommend(self, user_id: int, skills: list[str], n: int = 20) -> dict[str, Any]:
+    def recommend(self, user_id: int, skills: list[str], n: int = 20, focus: str = DEFAULT_FOCUS, mods: str = "",
+                  ar_cap: float | None = None, _log: bool = True) -> dict[str, Any]:
+        import math
+
         import numpy as np
+
+        focus = focus if focus in FOCUS_WEIGHT else DEFAULT_FOCUS
+        mods_key = normalize_mods(mods)
+        if mods_key is None:
+            return {"error": "mods inválidos: usa combinações de DT, HT, HD, HR, EZ (NM = sem mods)"}
+        mods = mods_key
 
         skills = [s for s in dict.fromkeys(skills) if s in AXES]
         if not skills:
@@ -419,6 +485,12 @@ class Recommender:
             return {"error": str(exc)}
         style = self._style(pdata)
         idx = self._index
+        view = None
+        if mods:
+            view = self._mods_view(mods)
+            if view is None:
+                return {"error": f"sem vista {mods}: falta o catálogo (catalog/v2/map_attributes.parquet) ou a pool de referência"}
+            idx = {**self._index, "x": view["x"], "axis": view["axis"]}
         axis = idx["axis"]
         delta = {a: axis[:, INDEX_AXES.index(a)] - pdata.levels[a] for a in AXES}
         sel_delta = np.mean([delta[a] for a in skills], axis=0)
@@ -428,26 +500,102 @@ class Recommender:
 
         n_maps = len(idx["ids"])
         acc_cur = np.full(n_maps, np.nan)
-        for j, b in pdata.best.items():
-            acc_cur[j] = b["acc"]
         played_mask = np.zeros(n_maps, dtype=bool)
-        played_mask[list(pdata.played)] = True
+        if view is None:
+            for j, b in pdata.best.items():
+                acc_cur[j] = b["acc"]
+            played_mask[list(pdata.played)] = True
+        else:  # com DT, "jogado"/"passado" = jogado/passado COM DT (um mapa só jogado sem mods é novo para o DT)
+            dt_played, dt_best = mods_state(self.store, user_id, idx["ids"], mods)
+            for j, a in dt_best.items():
+                acc_cur[j] = a
+            played_mask[list(dt_played)] = True
         passed_mask = ~np.isnan(acc_cur)
+        unavailable = ~view["valid"] if view is not None else np.zeros(n_maps, dtype=bool)
+        # limites pessoais medidos nos teus passes: o modelo não extrapola (ex.: AR efetivo > ao máximo que já passaste, ou muito acima das ★ já passadas com esses mods)
+        limits = self._limits(user_id, mods) or {}
+        cap_used = ar_cap if ar_cap is not None else limits.get("ar_cap")
+        n_over = 0
+        if cap_used is not None or limits.get("stars_ceiling") is not None:
+            over = np.zeros(n_maps, dtype=bool)
+            if cap_used is not None:
+                over |= idx["x"][:, 5] > cap_used  # coluna `ar` (efetivo na vista dos mods)
+            if limits.get("stars_ceiling") is not None:
+                over |= idx["x"][:, 0] > limits["stars_ceiling"]
+            n_over = int((over & ~unavailable).sum())
+            unavailable = unavailable | over
         # só se prevê para quem pode vir a ser candidato (mesmos filtros de desafio/eixos que abaixo)
         cand = (~passed_mask & (sel_delta >= MIN_DELTA_NEW) & (other_excess <= OTHER_AXIS_LIMIT)) | \
                (passed_mask & (sel_delta >= MIN_DELTA_REPLAY) & (other_excess <= OTHER_AXIS_LIMIT + 4))
-        key = (user_id, tuple(sorted(skills)), len(pdata.played) + pdata.n_passes)
+        cand = cand & ~unavailable
+        key = (user_id, tuple(sorted(skills)), len(pdata.played) + pdata.n_passes, mods)
         pr = self._cache.get(key)
         if pr is None:
-            pr = self._predict_all(pdata, np.nonzero(cand)[0])
+            pr = self._predict_all(pdata, np.nonzero(cand)[0], x=idx["x"])
             self._cache = {key: pr}
+        if mods:  # a accuracy do DT pode vir da vista nomod (se o dt-check mostrou menor erro): escolha medida, ver analysis/dt_check.py
+            cal0 = self._mods_cal(mods)
+            if cal0 and cal0.get("acc_source") == "nomod":
+                key_nm = key + ("acc_nomod",)
+                pr_nm = self._cache.get(key_nm)
+                if pr_nm is None:
+                    pr_nm = self._predict_all(pdata, np.nonzero(cand)[0], x=self._index["x"])
+                    self._cache[key_nm] = pr_nm
+                pr = {**pr, "acc": pr_nm["acc"], "acc_raw": pr_nm["acc_raw"]}
         p_raw, acc_raw = pr["p_pass_raw"], pr["acc_raw"]
         p_model, acc_model = pr["p_pass"], pr["acc"]  # modelo + calibração global (é isto que fica no registo: o ajuste por jogador estima-se a partir dos valores brutos)
         from .adjust import apply_adjustment
 
         adj = self._adjustment(user_id)
         p_pass, acc = apply_adjustment(p_model, acc_model, adj)  # correção por jogador (encolhida para 0 com poucos dados)
-        blocked = self._blocked_mask(user_id)
+        mods_cal = None
+        if mods:
+            p_pass, acc, mods_cal = self._mods_adjust(mods, p_pass, acc)  # ajuste global medido com jogadas reais com esses mods (se existir)
+        blocked_user = self._blocked_mask(user_id)
+        blocked = blocked_user | unavailable
+        min_safe, min_fb = MIN_PASS_PROB, MIN_PASS_PROB_FALLBACK
+        if mods:  # com DT a probabilidade calibrada varia pouco (o modelo distingue mal fácil de difícil): "seguro" = décimo melhor das previsões, "arriscado" = quarto melhor
+            pool_m = cand & (acc >= MIN_EXPECTED_ACC) & ~blocked
+            if pool_m.any():
+                min_safe = float(max(0.5, np.quantile(p_pass[pool_m], 0.90)))
+                min_fb = float(max(0.45, np.quantile(p_pass[pool_m], 0.75)))
+        # ganho de pp (foco "pp"/"equilibrado"): pp oficial esperado do mapa à accuracy esperada e quanto sobem os pp TOTAIS do jogador se passar
+        pp_est = np.full(n_maps, np.nan)
+        pp_gain = np.zeros(n_maps)
+        g_norm = np.zeros(n_maps)
+        w_pp, total_pp_now = 0.0, None
+        pp_pool_info: dict[str, Any] = {}
+        pp_model = self._pp_model() if FOCUS_WEIGHT[focus] > 0 else None
+        if pp_model is not None:
+            try:
+                rows_c = np.nonzero(cand)[0]
+                pp_est[rows_c] = pp_model.predict(idx["ids"][rows_c], acc[rows_c], mods=mods)
+                best_pp = player_best_pp(self.store, user_id)
+                plist = np.sort(np.array(list(best_pp.values()), dtype=float))[::-1]
+                total_pp_now = total_pp(plist)
+                ok_pp = ~np.isnan(pp_est)
+                # o pp conta o MELHOR score por mapa (com quaisquer mods): se já tens pp nesse mapa, o ganho é a substituição; senão, a inserção
+                old_arr = np.array([best_pp.get(int(i), np.nan) for i in idx["ids"]], dtype=float)
+                fresh = ok_pp & np.isnan(old_arr)
+                pp_gain[fresh] = marginal_gain(plist, pp_est[fresh])
+                for j in np.nonzero(ok_pp & ~np.isnan(old_arr))[0]:
+                    pp_gain[j] = replace_gain(plist, float(old_arr[j]), float(pp_est[j]))
+                e_gain = np.where(ok_pp, p_pass * pp_gain, 0.0)
+                # normaliza pelo P90 do ganho esperado entre os mapas que um jogador ambicioso aceitaria (P(passar) ≥ 40 %, accuracy ≥ 88 %, ganho real)
+                pool = ok_pp & (p_pass >= AMBITIOUS_MIN_PASS) & (acc >= MIN_EXPECTED_ACC) & (pp_gain >= AMBITIOUS_MIN_GAIN) & ~blocked
+                safe_pool = ok_pp & (p_pass >= min_fb) & (acc >= MIN_EXPECTED_ACC) & ~blocked & (e_gain > 0)
+                src = pool if pool.any() else safe_pool  # sem ambiciosos reais: o ganho serve para reordenar os mapas seguros
+                ref = float(np.quantile(e_gain[src], 0.9)) if src.any() else 0.0
+                if ref > 0:
+                    g_norm = np.clip(e_gain / ref, 0.0, 1.0)
+                    w_pp = FOCUS_WEIGHT[focus]
+                best_gain = float(np.max(pp_gain[ok_pp & (p_pass >= min_fb) & (acc >= MIN_EXPECTED_ACC)], initial=0.0))
+                pp_pool_info = {"best_gain_safe": round(best_gain, 2), "n_ambitious_pool": int(pool.sum()),
+                                "pp_50th_best": round(float(plist[49]), 1) if len(plist) > 49 else None,
+                                "pp_100th_best": round(float(plist[99]), 1) if len(plist) > 99 else None}
+            except Exception:  # o ganho de pp é um extra: nunca pode impedir a recomendação
+                w_pp, pp_est[:] = 0.0, np.nan
+        cap_axes = len(skills) >= 2 and w_pp > 0  # com várias skills e foco em pp: a lista não pode inclinar toda para o mesmo eixo
         gain_acc = np.where(passed_mask, acc - acc_cur, 0.0)
         gain_pp = np.where(passed_mask, (pp_factor(acc) / np.maximum(pp_factor(np.nan_to_num(acc_cur, nan=0.85)), 1e-6) - 1) * 100, 0.0)
         gain_norm = np.clip(gain_pp / 40.0, 0.0, 1.0)
@@ -455,22 +603,29 @@ class Recommender:
         per_set: dict[Any, int] = {}
         taken: set[int] = set()
 
-        def eligible(min_p):
+        def eligible(min_p, ambitious=False):
             ok = (p_pass >= min_p) & (acc >= MIN_EXPECTED_ACC) & ~blocked
+            if ambitious:  # nível ambicioso: só mapas com ganho real nos pp totais (o resto das regras mantém-se)
+                ok = ok & ~np.isnan(pp_est) & (pp_gain >= AMBITIOUS_MIN_GAIN)
             new_ok = ~played_mask & ok & (sel_delta >= MIN_DELTA_NEW) & (other_excess <= OTHER_AXIS_LIMIT)
             retry_ok = played_mask & ~passed_mask & ok & (sel_delta >= MIN_DELTA_NEW) & (other_excess <= OTHER_AXIS_LIMIT)
             replay_ok = (passed_mask & ok & (gain_acc >= MIN_ACC_GAIN) & (gain_pp >= MIN_PP_GAIN_PCT) & (sel_delta >= MIN_DELTA_REPLAY)
                          & (other_excess <= OTHER_AXIS_LIMIT + 4))
             score = np.full(n_maps, -np.inf)
-            base = 0.35 * challenge + 0.25 * learn + 0.20 * p_pass + 0.20 * style - 0.02 * other_excess
+            base = (1 - w_pp) * (0.35 * challenge + 0.25 * learn + 0.20 * p_pass + 0.20 * style) + w_pp * g_norm - 0.02 * other_excess
             score[new_ok | retry_ok] = base[new_ok | retry_ok]
-            rep = 0.30 * challenge + 0.35 * gain_norm + 0.15 * p_pass + 0.20 * style - 0.02 * other_excess
+            rep = (1 - w_pp) * (0.30 * challenge + 0.35 * gain_norm + 0.15 * p_pass + 0.20 * style) + w_pp * g_norm - 0.02 * other_excess
             score[replay_ok] = rep[replay_ok]
+            if ambitious:  # o ganho esperado de pp manda; a probabilidade e o estilo desempatam
+                amb = 0.75 * g_norm + 0.15 * p_pass + 0.10 * style - 0.02 * other_excess
+                score[new_ok | retry_ok | replay_ok] = amb[new_ok | retry_ok | replay_ok]
             return score, new_ok, retry_ok, replay_ok
 
-        def pick(min_p, limit, tier):
-            score, new_ok, retry_ok, replay_ok = eligible(min_p)
+        def pick(min_p, limit, tier, ambitious=False):
+            score, new_ok, retry_ok, replay_ok = eligible(min_p, ambitious)
             out: list[dict[str, Any]] = []
+            axis_n: dict[str, int] = {}
+            axis_cap = max(1, math.ceil(MAX_AXIS_SHARE * limit))
             for j in np.argsort(-score)[: max(n * 6, 200)]:
                 if not np.isfinite(score[j]) or len(out) >= limit:
                     break
@@ -480,27 +635,42 @@ class Recommender:
                 sid = lab.get("set_id")
                 if sid is not None and per_set.get(sid, 0) >= MAX_PER_SET:
                     continue
+                if cap_axes:
+                    dom = max(skills, key=lambda a: delta[a][j])
+                    if axis_n.get(dom, 0) >= axis_cap:
+                        continue
+                    axis_n[dom] = axis_n.get(dom, 0) + 1
                 per_set[sid] = per_set.get(sid, 0) + 1
                 kind = "rejogar" if replay_ok[j] else ("tentar_de_novo" if retry_ok[j] else "novo")
-                it = self._item(int(j), kind, lab, idx, score, p_pass, acc, p_raw, acc_raw, acc_cur, gain_acc, gain_pp, sel_delta, delta, style, pdata, skills)
+                it = self._item(int(j), kind, lab, idx, score, p_pass, acc, p_raw, acc_raw, acc_cur, gain_acc, gain_pp, sel_delta, delta, style, pdata, skills,
+                                 {"est": pp_est, "gain": pp_gain, "p": p_pass, "on": w_pp > 0})
                 it["tier"] = tier
+                it["mods"] = mods
+                if mods:
+                    it["label"] += f" +{mods}"
+                    it["why"] = f"com {mods}: " + it["why"]
                 it["p_pass_model"], it["acc_pass_model"] = round(float(p_model[j]), 3), round(float(acc_model[j]), 4)
+                if tier == "ambicioso":
+                    it["why"] += (f"; nível ambicioso: P(passar) {p_pass[j] * 100:.0f} % (abaixo de {min_safe * 100:.0f} %), mas é dos mapas que mais sobem os teus pp totais")
                 if tier == "arriscado":
-                    it["why"] += f"; P(passar) abaixo de {MIN_PASS_PROB * 100:.0f} %: só aparece porque havia menos de {MIN_SAFE_ITEMS} sugestões com {MIN_PASS_PROB * 100:.0f} %"
+                    it["why"] += f"; P(passar) abaixo de {min_safe * 100:.0f} %: só aparece porque havia menos de {MIN_SAFE_ITEMS} sugestões com {min_safe * 100:.0f} %"
                 out.append(it)
                 taken.add(int(j))
             return out
 
-        items = pick(MIN_PASS_PROB, n, "seguro")  # 1.ª camada: P(passar) >= 80 % e accuracy esperada ao passar >= 88 %
+        n_amb = int(round(n * AMBITIOUS_SHARE[focus])) if w_pp > 0 else 0
+        amb_items = pick(AMBITIOUS_MIN_PASS, n_amb, "ambicioso", ambitious=True) if n_amb else []  # mapas que mexem nos pp totais (P(passar) ≥ 40 %)
+        items = pick(min_safe, n - len(amb_items), "seguro")  # 1.ª camada: P(passar) >= 80 % e accuracy esperada ao passar >= 88 %
         n_safe = len(items)
         if n_safe < MIN_SAFE_ITEMS:  # poucas: completa com P(passar) >= 70 % (a accuracy esperada continua >= 88 %)
-            items += pick(MIN_PASS_PROB_FALLBACK, n - n_safe, "arriscado")
-        _, new_ok, retry_ok, replay_ok = eligible(MIN_PASS_PROB)
-        if self.log_predictions and items:
+            items += pick(min_fb, max(n - len(amb_items) - n_safe, 0), "arriscado")
+        items = amb_items + items if focus == "pp" else items + amb_items  # foco pp: os ambiciosos primeiro; equilibrado: depois dos seguros
+        _, new_ok, retry_ok, replay_ok = eligible(min_safe)
+        if self.log_predictions and items and _log:  # regista (com os mods e o foco): o resultado só conta jogadas com exatamente esses mods
             try:
                 from .log import log_recommendations
 
-                log_recommendations(self.store, user_id, items, skills, self.model_info().get("fingerprint"))
+                log_recommendations(self.store, user_id, items, skills, self.model_info().get("fingerprint"), focus=focus)
             except Exception:  # o registo nunca pode impedir uma recomendação
                 pass
         notes_adj = ([f"correção por jogador (medida nas tuas jogadas anteriores): accuracy {-float(adj.get('acc_bias') or 0.0) * 100:+.1f} pontos, "
@@ -509,15 +679,115 @@ class Recommender:
                            "n_passes_used": pdata.n_passes, "n_played_maps": len(pdata.played),
                            "adjust": None if not adj else {"acc_bias_pts": round(float(adj.get("acc_bias") or 0.0) * 100, 2), "pass_offset": adj.get("pass_offset"),
                                                            "n_acc": adj.get("n_acc"), "n_pass": adj.get("n_pass")},
-                           "n_blocked": int(blocked.sum())},
-                "skills": skills, "items": items,
-                "counts": {"novo": int(new_ok.sum()), "tentar_de_novo": int(retry_ok.sum()), "rejogar": int(replay_ok.sum()), "sugestoes_seguras": n_safe},
+                           "n_blocked": int(blocked_user.sum())},
+                "skills": skills, "items": items, "focus": focus, "mods": mods,
+                "limits": {**limits, "ar_cap_used": cap_used, "excluded_maps": n_over},
+                "mods_calibration": None if not mods_cal else {k: mods_cal.get(k) for k in ("n_attempts", "n_players", "auc_before", "auc_after", "pass", "acc_shift")},
+                "pp": {"active": w_pp > 0, "weight": w_pp, "total_pp_now": None if total_pp_now is None else round(total_pp_now, 1), **pp_pool_info,
+                       "note": ("ganho = pp totais que ganhas se passares (fórmula do jogo: 0,95^posição, só mapas distintos, sem o bónus por nº de scores); "
+                                "pp esperado vem do modelo do pp oficial à accuracy esperada") if w_pp > 0 else
+                       ("foco em pp desligado" + ("" if focus == "skill" else ": falta o modelo do pp oficial (analyze pp-model) ou o catálogo"))},
+                "counts": {"ambiciosos": len(amb_items), "novo": int(new_ok.sum()), "tentar_de_novo": int(retry_ok.sum()), "rejogar": int(replay_ok.sum()), "sugestoes_seguras": n_safe},
                 "notes": [*pdata.notes, *notes_adj, "Atributos dos mapas sem mods; previsão com o perfil de forma atual do jogador (não a forma de hoje, nem mods).",
                           "Nível = P90 dos melhores passes; nota 50 = mapa mediano, +20 por desvio-padrão.",
-                          f"Regra: P(passar) ≥ {MIN_PASS_PROB * 100:.0f} % e accuracy esperada ao passar ≥ {MIN_EXPECTED_ACC * 100:.0f} % (ideal ~{TARGET_ACC * 100:.0f} %). "
-                          "'arriscado' = P(passar) entre 70 % e 80 %."]}
+                          f"Regra: P(passar) ≥ {min_safe * 100:.0f} % e accuracy esperada ao passar ≥ {MIN_EXPECTED_ACC * 100:.0f} % (ideal ~{TARGET_ACC * 100:.0f} %). "
+                          f"'arriscado' = P(passar) entre {min_fb * 100:.0f} % e {min_safe * 100:.0f} %.",
+                          *([f"DT: P(passar) calibrada com {mods_cal.get('n_pairs')} pares reais ({mods_cal.get('n_players')} jogadores); o modelo distingue pouco mapas DT fáceis de difíceis "
+                             f"(AUC ~{(mods_cal.get('auc_before') or 0):.2f}), por isso 'seguro' = décimo melhor das previsões (≥ {min_safe * 100:.0f} %), não ≥ 80 %; accuracy pela vista "
+                             f"{'nomod' if mods_cal.get('acc_source') == 'nomod' else 'DT'} com deslocamento {float(mods_cal.get('acc_shift') or 0) * 100:+.1f} pts. Previsões indicativas."]
+                            if mods and mods_cal else [])]}
 
-    def _item(self, j, kind, lab, idx, score, p_pass, acc, p_raw, acc_raw, acc_cur, gain_acc, gain_pp, sel_delta, delta, style, pdata, skills):
+    def band_candidates(self, user_id: int, stars_lo: float, stars_hi: float, *, mods: str = "", min_p: float = 0.0, max_ar: float | None = None,
+                        unseen: bool = True, n: int = 20, order: str = "p", seed: int = 0) -> list[dict[str, Any]]:
+        """Mapas numa faixa de estrelas (com esses mods) para montar sessões de treino e o teste semanal: sem os já jogados (`unseen`, com quaisquer mods), sem os bloqueados, com AR efetivo ≤ `max_ar`
+        e P(passar) calibrada ≥ `min_p`. `order`: "p" = mais prováveis primeiro; "random" = ordem aleatória reprodutível (`seed`). Devolve [] se faltar o catálogo/modelos."""
+        import numpy as np
+
+        from .adjust import apply_adjustment
+
+        mods_key = normalize_mods(mods)
+        ok, _why = self.ready()
+        if mods_key is None or not ok:
+            return []
+        try:
+            self._load()
+            pdata = self.load_player(user_id)
+        except ValueError:
+            return []
+        idx = self._index
+        view = None
+        if mods_key:
+            view = self._mods_view(mods_key)
+            if view is None:
+                return []
+            idx = {**idx, "x": view["x"], "axis": view["axis"]}
+        x = idx["x"]
+        mask = (x[:, 0] >= stars_lo) & (x[:, 0] <= stars_hi)
+        if view is not None:
+            mask &= view["valid"]
+        if max_ar is not None:
+            mask &= x[:, 5] <= max_ar
+        if unseen:
+            played = np.zeros(len(x), dtype=bool)
+            played[list(pdata.played)] = True
+            mask &= ~played
+        mask &= ~self._blocked_mask(user_id)
+        rows = np.nonzero(mask)[0]
+        if not len(rows):
+            return []
+        pr = self._predict_all(pdata, rows, x=x)
+        p, acc = apply_adjustment(pr["p_pass"], pr["acc"], self._adjustment(user_id))
+        if mods_key:
+            p, acc, _cal = self._mods_adjust(mods_key, p, acc)
+        rows = rows[p[rows] >= min_p]
+        if order == "random":
+            rows = np.random.default_rng(seed).permutation(rows)
+        else:
+            rows = rows[np.argsort(-p[rows])]
+        out = []
+        for j in rows[:n]:
+            lab = idx["labels"].get(int(idx["ids"][j]), {})
+            bid = int(idx["ids"][j])
+            title = f'{lab.get("artist", "")} – {lab.get("title", "")}'.strip(" –") if lab.get("title") else f"mapa #{bid}"
+            version = lab.get("version", "")
+            d = {a: float(idx["axis"][j, INDEX_AXES.index(a)]) - pdata.levels[a] for a in AXES}
+            out.append({"beatmap_id": bid, "label": f"{title} [{version}]" if version else title, "url": beatmap_url(bid, lab.get("set_id")),
+                        "stars": round(float(x[j, 0]), 2), "ar": round(float(x[j, 5]), 2), "p_pass": round(float(p[j]), 3), "acc_pass": round(float(acc[j]), 4),
+                        "dominant": max(d, key=d.get), "mods": mods_key})
+        return out
+
+    def recommend_many(self, user_id: int, skills: list[str], n: int = 20, focus: str = DEFAULT_FOCUS, mods_list: list[str] | None = None,
+                       ar_cap: float | None = None) -> dict[str, Any]:
+        """Várias seleções de mods de uma vez (ex.: ["", "DT", "HD,DT"]): cada uma recomenda por si (limiares e limites próprios) e a lista final junta as melhores de cada,
+        por pontuação, com cada sugestão marcada com os seus mods."""
+        import math
+
+        wanted = list(dict.fromkeys(mods_list if mods_list else [""]))
+        if len(wanted) == 1:
+            return self.recommend(user_id, skills, n, focus, mods=wanted[0], ar_cap=ar_cap)
+        results = [(m, self.recommend(user_id, skills, n, focus, mods=m, ar_cap=ar_cap, _log=False)) for m in wanted]
+        ok = [(m, r) for m, r in results if "error" not in r]
+        if not ok:
+            return results[0][1]
+        per = max(1, math.ceil(n / len(ok)))
+        items = [it for _m, r in ok for it in r["items"][:per]]
+        items.sort(key=lambda it: -it["score"])
+        base = dict(ok[0][1])
+        base["items"] = items[:n]
+        base["mods"] = [m for m, _ in ok]
+        base["by_mods"] = {(m or "NM"): {"counts": r["counts"], "limits": r.get("limits"), "mods_calibration": r.get("mods_calibration"), "n_items": len(r["items"])} for m, r in ok}
+        base["notes"] = list(dict.fromkeys(note for _m, r in ok for note in r["notes"]))
+        base["errors"] = {(m or "NM"): r["error"] for m, r in results if "error" in r}
+        if self.log_predictions and base["items"]:  # regista só a lista final que o jogador vê
+            try:
+                from .log import log_recommendations
+
+                log_recommendations(self.store, user_id, base["items"], base["skills"], self.model_info().get("fingerprint"), focus=focus)
+            except Exception:
+                pass
+        return base
+
+    def _item(self, j, kind, lab, idx, score, p_pass, acc, p_raw, acc_raw, acc_cur, gain_acc, gain_pp, sel_delta, delta, style, pdata, skills, ppx=None):
         import numpy as np
 
         bid = int(idx["ids"][j])
@@ -533,6 +803,11 @@ class Recommender:
                          f"(≈ +{gain_pp[j]:.0f} % de pp nesse mapa)")
         elif kind == "tentar_de_novo":
             parts.append("já tentaste mas ainda não passaste; o teu perfil sugere que é alcançável")
+        pp_fields = {}
+        if ppx and ppx["on"] and not np.isnan(ppx["est"][j]):
+            gain = float(ppx["gain"][j])
+            pp_fields = {"pp_est": round(float(ppx["est"][j]), 1), "pp_gain": round(gain, 1), "pp_gain_exp": round(float(ppx["p"][j]) * gain, 1)}
+            parts.append(f"≈ {pp_fields['pp_est']:.0f} pp se passares; sobem os teus pp totais ≈ +{gain:.1f} (esperado ≈ +{pp_fields['pp_gain_exp']:.1f} contando a probabilidade de passar)")
         if style[j] > 0:
             parts.append(f"jogado por jogadores parecidos (top {max(1, round((1 - float(style[j])) * 100))} % dos mapas para o teu perfil)")
         return {"beatmap_id": bid, "artist": lab.get("artist", ""), "title": lab.get("title", "") or f"mapa #{bid}", "version": version,
@@ -543,7 +818,7 @@ class Recommender:
                 "p_pass_raw": round(float(p_raw[j]), 3), "acc_pass_raw": round(float(acc_raw[j]), 4),
                 "acc_cur": None if np.isnan(acc_cur[j]) else round(float(acc_cur[j]), 4),
                 "pp_gain_pct": round(float(gain_pp[j]), 1) if kind == "rejogar" else None,
-                "style_pct": round(float(style[j]) * 100, 1), "score": round(float(score[j]), 4), "why": "; ".join(parts)}
+                "style_pct": round(float(style[j]) * 100, 1), "score": round(float(score[j]), 4), "why": "; ".join(parts), **pp_fields}
 
     # -------------------------------------------------------------- bloqueios
     def _blocked_mask(self, user_id: int):

@@ -1,0 +1,299 @@
+"""Semana de treino: **teste semanal**, **sessões** (cada uma com a sua parte de treino) e **recomendações por sessão**.
+
+- **Teste semanal**: 5 mapas **nunca jogados** (sem mods) numa **faixa de estrelas fixa** (guardada à 1.ª vez para as semanas serem comparáveis), escolhidos ao acaso de forma reprodutível por semana
+  (mesma semana ⇒ mesmos mapas). O que conta é a **1.ª jogada** de cada mapa: accuracy e se passou — mede o que generalizas, não o que decoraste. Em paralelo há uma série retrospetiva
+  (qualquer mapa novo que tenhas jogado na faixa, semana a semana), que já tem histórico.
+- **Sessões** (~20 min cada): A consolidar (mapas onde já tens 92-97 %), B esticar (1 mapa acima do teu tecto), C variedade/leitura (mapas novos, estilos diferentes), D DT (1×/semana, AR a subir).
+  Cada uma tem aquecimento, bloco principal (os mapas recomendados) e fecho, com regras de tentativas.
+- O plano de cada semana é gerado **uma vez** (num fio de fundo, o recomendador demora alguns segundos) e guardado em `data/control/weekly/`; o estado de cada mapa (jogado, accuracy) é recalculado
+  sempre a partir das jogadas na base de dados. Nada aqui faz pedidos à API.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+TEST_MAPS = 5
+MIN_EVIDENCE_ACC = 0.90
+COMFORT_ACC = 0.93
+MIN_PASSES_FOR_BAND = 5
+HISTORY_WEEKS = 12
+BLOCKS = {
+    "A": {"title": "Consolidar", "minutes": 20,
+          "goal": "Subir 1 a 2 pontos de accuracy em mapas onde já tens 92-97 %.",
+          "rules": ["2 a 3 tentativas por mapa; pausa de 1 min entre mapas.", "Se à 3.ª não subiste, passa ao seguinte (não insistas).",
+                    "Pára se tiveres 3 tentativas seguidas abaixo da tua média: é cansaço."]},
+    "B": {"title": "Esticar", "minutes": 20,
+          "goal": "Passar um mapa acima do teu tecto, primeiro com ≥ 90 % e depois com ≥ 93 %.",
+          "rules": ["No máximo 5 tentativas no mesmo mapa; depois muda.", "A 1.ª tentativa é para ler o mapa: não procures accuracy.",
+                    "Sucesso por degraus: passar → ≥ 90 % → ≥ 93 %."]},
+    "C": {"title": "Variedade e leitura", "minutes": 20,
+          "goal": "Jogar mapas novos de estilos diferentes, sem repetir.",
+          "rules": ["1 a 2 tentativas por mapa; a 1.ª é a que conta.", "Opcional: HD nos mapas de ≤ 5,5★ para forçar a leitura."]},
+    "D": {"title": "DT (1× por semana)", "minutes": 20,
+          "goal": "Tolerar AR mais alto e subir a velocidade de tap, dentro do teu tecto em DT.",
+          "rules": ["Só mapas de DT dentro do teu tecto de estrelas e AR.", "A accuracy em DT é outra skill: não a compares com a sem mods."]},
+}
+WARMUP = {"name": "Aquecimento", "minutes": 4, "what": "2 mapas fáceis (≥ 1★ abaixo do teu nível) a ≥ 97 %, sem procurar score: acerta o timing e a mão."}
+CLOSING = {"name": "Fecho", "minutes": 3, "what": "Escreve 1 coisa que falhou (leitura, timing ou aim) e em que mapa; é o ponto de partida da próxima sessão."}
+
+
+def week_monday(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def week_id(d: date) -> str:
+    iso = d.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _day(v: Any) -> date | None:
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "")).date()
+    except ValueError:
+        return None
+
+
+def _mods(p: dict[str, Any]) -> str:
+    """Chave dos mods da jogada (NC=DT; NF/SO/CL ignorados): "" = sem mods."""
+    from ..recommend.modsview import stable_key
+
+    return stable_key(p.get("mods"))
+
+
+def _is_nomod(p: dict[str, Any]) -> bool:
+    return _mods(p) == ""
+
+
+def _stars(p: dict[str, Any]) -> float | None:
+    s = (p.get("raw") or {}).get("stars")
+    return float(s) if s is not None else None
+
+
+def _median(v: list[float]) -> float | None:
+    if not v:
+        return None
+    s = sorted(v)
+    return s[len(s) // 2] if len(s) % 2 else (s[len(s) // 2 - 1] + s[len(s) // 2]) / 2
+
+
+def nomod_stats(plays: list[dict[str, Any]], today: date) -> dict[str, Any]:
+    """Estrelas de referência a partir das tuas jogadas sem mods: `s90` (P90 dos passes ≥ 93 % nas últimas 8 semanas; senão de sempre) e `s_max` (máx. dos passes ≥ 90 %)."""
+    rows = [(p, _stars(p), _day(p["ended_at"])) for p in plays if _is_nomod(p) and p["passed"] and p["accuracy"] and _stars(p)]
+    recent = [s for p, s, d in rows if p["accuracy"] >= COMFORT_ACC and d and (today - d).days <= 56]
+    allc = [s for p, s, d in rows if p["accuracy"] >= COMFORT_ACC]
+    ev = [s for p, s, d in rows if p["accuracy"] >= MIN_EVIDENCE_ACC]
+    pool = sorted(recent if len(recent) >= 5 else allc)
+    if len(pool) < MIN_PASSES_FOR_BAND or not ev:  # sem evidência suficiente não se inventa uma faixa
+        return {"s90": None, "s_max": None, "n": len(rows)}
+    return {"s90": round(pool[int(0.9 * (len(pool) - 1))], 2), "s_max": round(max(ev), 2), "n": len(rows)}
+
+
+def default_band(stats: dict[str, Any]) -> list[float] | None:
+    return [round(stats["s90"] - 0.2, 1), round(stats["s90"] + 0.5, 1)] if stats.get("s90") else None
+
+
+def first_plays(plays: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """1.ª jogada de sempre de cada mapa (com quaisquer mods), por ordem cronológica."""
+    first: dict[int, dict[str, Any]] = {}
+    for p in sorted(plays, key=lambda q: str(q["ended_at"] or "")):
+        first.setdefault(p["beatmap_id"], p)
+    return first
+
+
+def first_time_series(plays: list[dict[str, Any]], band: list[float], today: date, weeks: int = HISTORY_WEEKS) -> list[dict[str, Any]]:
+    """Por semana: mapas que jogaste pela 1.ª vez (sem mods) com estrelas na faixa; accuracy mediana dos passes e taxa de passe. Retrospetivo, sem plano."""
+    first = first_plays(plays)
+    this_week = week_monday(today)
+    out = []
+    for i in range(weeks - 1, -1, -1):
+        ws = this_week - timedelta(weeks=i)
+        sel = [p for p in first.values() if _is_nomod(p) and (d := _day(p["ended_at"])) and ws <= d < ws + timedelta(days=7)
+               and _stars(p) is not None and band[0] <= _stars(p) <= band[1]]
+        ok = [p["accuracy"] for p in sel if p["passed"] and p["accuracy"]]
+        out.append({"week": ws.isoformat(), "n": len(sel), "n_pass": len(ok), "pass_rate": round(len(ok) / len(sel), 3) if sel else None,
+                    "acc_median": round(_median(ok), 4) if ok else None})
+    return out
+
+
+def _map_status(plays: list[dict[str, Any]], bid: int, mods: str, start: date, end: date) -> dict[str, Any]:
+    mine = sorted((p for p in plays if p["beatmap_id"] == bid and _mods(p) == mods and (d := _day(p["ended_at"])) and start <= d < end),
+                  key=lambda q: str(q["ended_at"] or ""))
+    if not mine:
+        return {"played": False}
+    passes = [p["accuracy"] for p in mine if p["passed"] and p["accuracy"]]
+    return {"played": True, "attempts": len(mine), "first_acc": mine[0]["accuracy"], "first_passed": bool(mine[0]["passed"]),
+            "best_acc": max(passes) if passes else None, "passed": bool(passes)}
+
+
+def evaluate(plan: dict[str, Any], plays: list[dict[str, Any]]) -> dict[str, Any]:
+    """Acrescenta ao plano o que já aconteceu nesta semana (estado de cada mapa, progresso das sessões e resumo do teste)."""
+    start = date.fromisoformat(plan["week_start"])
+    end = start + timedelta(days=7)
+    for m in plan["test"]["maps"]:
+        m["status"] = _map_status(plays, m["beatmap_id"], "", start, end)
+    done = [m["status"] for m in plan["test"]["maps"] if m["status"]["played"]]
+    accs = [s["first_acc"] for s in done if s["first_passed"] and s["first_acc"]]
+    plan["test"]["summary"] = {"done": len(done), "total": len(plan["test"]["maps"]), "first_pass": sum(s["first_passed"] for s in done),
+                               "first_acc_median": round(_median(accs), 4) if accs else None}
+    for s in plan["sessions"]:
+        for m in s["maps"]:
+            m["status"] = _map_status(plays, m["beatmap_id"], m.get("mods") or "", start, end)
+        s["progress"] = {"done": sum(m["status"]["played"] for m in s["maps"]), "total": len(s["maps"])}
+    return plan
+
+
+class WeeklyPlanner:
+    """Gera (num fio de fundo) e guarda o plano da semana; devolve-o já avaliado contra as jogadas."""
+
+    def __init__(self, recommender: Any | None, control_dir: Path) -> None:
+        self.rec = recommender
+        self.dir = Path(control_dir) / "weekly"
+        self._building: set[str] = set()
+        self._lock = threading.Lock()
+        self._errors: dict[str, str] = {}
+
+    # ------------------------------------------------------------------ ficheiros
+    def _plan_file(self, uid: int, wid: str) -> Path:
+        return self.dir / f"{uid}_{wid}.json"
+
+    def _band_file(self, uid: int) -> Path:
+        return self.dir / f"{uid}_test_band.json"
+
+    def test_band(self, uid: int, goal: dict[str, Any], stats: dict[str, Any]) -> list[float] | None:
+        """Faixa do teste: `goal.test_band` se existir; senão a guardada; senão calcula-se e guarda-se (fica fixa para as semanas serem comparáveis)."""
+        if goal.get("test_band"):
+            return [float(goal["test_band"][0]), float(goal["test_band"][1])]
+        f = self._band_file(uid)
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))["band"]
+        band = default_band(stats)
+        if band:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"band": band, "created_at": datetime.now().isoformat(), "stats": stats}), encoding="utf-8")
+        return band
+
+    # ------------------------------------------------------------------ estado
+    def state(self, uid: int, plays: list[dict[str, Any]], goal: dict[str, Any], today: date) -> dict[str, Any] | None:
+        stats = nomod_stats(plays, today)
+        band = self.test_band(uid, goal, stats)
+        out: dict[str, Any] = {"week": week_id(today), "week_start": week_monday(today).isoformat(), "band": band, "stats": stats, "status": "unavailable",
+                               "series": first_time_series(plays, band, today) if band else [], "history": self._history(uid, plays, today)}
+        if band is None:
+            out["message"] = "ainda sem passes sem mods suficientes para definir a tua faixa"
+            return out
+        wid = week_id(today)
+        f = self._plan_file(uid, wid)
+        if f.exists():
+            plan = json.loads(f.read_text(encoding="utf-8"))
+            out.update(status="ready", **evaluate(plan, plays))
+            return out
+        if self.rec is None:
+            out["message"] = "recomendador indisponível: sem plano"
+            return out
+        with self._lock:
+            if wid in self._errors:
+                out.update(status="error", message=self._errors[wid])
+                return out
+            if wid not in self._building:
+                self._building.add(wid)
+                threading.Thread(target=self._build_thread, args=(uid, plays, goal, today, band, stats), name="weekly-plan", daemon=True).start()
+        out["status"] = "building"
+        return out
+
+    def _history(self, uid: int, plays: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
+        """Testes das semanas anteriores (planos guardados), avaliados contra as jogadas dessa semana."""
+        hist = []
+        for f in sorted(self.dir.glob(f"{uid}_????-W??.json")):
+            try:
+                plan = evaluate(json.loads(f.read_text(encoding="utf-8")), plays)
+            except (OSError, ValueError, KeyError):
+                continue
+            if plan["week"] == week_id(today):
+                continue
+            hist.append({"week": plan["week"], "week_start": plan["week_start"], **plan["test"]["summary"], "band": plan["test"]["band"]})
+        return hist[-HISTORY_WEEKS:]
+
+    def _build_thread(self, uid, plays, goal, today, band, stats) -> None:
+        wid = week_id(today)
+        try:
+            plan = build_plan(self.rec, uid, plays, today, band, stats)
+            self.dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._plan_file(uid, wid).with_suffix(".tmp")
+            tmp.write_text(json.dumps(plan, ensure_ascii=False, default=str), encoding="utf-8")
+            tmp.replace(self._plan_file(uid, wid))
+        except Exception as exc:  # o plano é um extra: nunca pode deitar a página abaixo
+            with self._lock:
+                self._errors[wid] = f"{type(exc).__name__}: {exc}"[:200]
+        finally:
+            with self._lock:
+                self._building.discard(wid)
+
+
+def _pick_diverse(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+    """Round-robin pelos eixos dominantes (aim/speed/stamina/reading) para a sessão de variedade não ser tudo do mesmo estilo."""
+    by: dict[str, list[dict[str, Any]]] = {}
+    for c in cands:
+        by.setdefault(c["dominant"], []).append(c)
+    out: list[dict[str, Any]] = []
+    while len(out) < n and any(by.values()):
+        for k in list(by):
+            if by[k] and len(out) < n:
+                out.append(by[k].pop(0))
+    return out
+
+
+def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, band: list[float], stats: dict[str, Any]) -> dict[str, Any]:
+    """Monta o teste e as sessões desta semana com o recomendador (só leitura local)."""
+    ws = week_monday(today)
+    limits = rec._limits(uid, "") or {}
+    ar_cap = limits.get("ar_cap") or 10.1
+    s90, s_max = stats["s90"], stats["s_max"]
+    seed = int(ws.strftime("%Y%m%d")) + int(uid)
+    test = rec.band_candidates(uid, band[0], band[1], mods="", min_p=0.35, max_ar=ar_cap, n=TEST_MAPS, order="random", seed=seed)
+    taken = {m["beatmap_id"] for m in test}
+
+    def clean(c: dict[str, Any], **extra: Any) -> dict[str, Any]:
+        return {"beatmap_id": c["beatmap_id"], "label": c["label"], "url": c["url"], "stars": c["stars"], "ar": c.get("ar"), "mods": c.get("mods") or "",
+                "p_pass": c.get("p_pass"), "acc_pass": c.get("acc_pass"), **extra}
+
+    # fixa as tuas próprias jogadas sem mods: melhor accuracy por mapa
+    best: dict[int, dict[str, Any]] = {}
+    for p in plays:
+        if _is_nomod(p) and p["passed"] and p["accuracy"] and _stars(p):
+            if p["beatmap_id"] not in best or p["accuracy"] > best[p["beatmap_id"]]["accuracy"]:
+                best[p["beatmap_id"]] = p
+    url = lambda bid: f"https://osu.ppy.sh/beatmaps/{bid}"  # noqa: E731
+    mine = lambda p, **extra: {"beatmap_id": p["beatmap_id"], "label": p["map"], "url": url(p["beatmap_id"]), "stars": round(_stars(p), 2), "mods": "", **extra}  # noqa: E731
+    consolidate = sorted((p for p in best.values() if 0.92 <= p["accuracy"] < 0.97 and s90 - 0.6 <= _stars(p) <= s90 + 0.3), key=lambda p: p["accuracy"])[:3]
+    warm = sorted((p for p in best.values() if p["accuracy"] >= 0.97 and _stars(p) <= s90 - 0.8), key=lambda p: -p["accuracy"])[:2]
+    stretch = rec.band_candidates(uid, s_max + 0.1, s_max + 0.8, mods="", min_p=0.2, max_ar=ar_cap, n=2, order="p")
+    variety = _pick_diverse([c for c in rec.band_candidates(uid, s90 - 0.3, s90 + 0.3, mods="", min_p=0.6, max_ar=ar_cap, n=60, order="p") if c["beatmap_id"] not in taken], 5)
+    dt_lim = rec._limits(uid, "DT") or {}
+    dt = []
+    if dt_lim.get("stars_ceiling"):
+        top = dt_lim["stars_ceiling"]
+        dt = [c for c in rec.band_candidates(uid, max(3.5, top - 1.0), top, mods="DT", min_p=0.5, max_ar=ar_cap, n=40, order="p") if c["ar"] >= 9.4][:3]
+
+    sessions = [
+        {"key": "A", **BLOCKS["A"], "maps": [mine(p, best_acc=p["accuracy"], target=round(min(p["accuracy"] + 0.015, 0.99), 3)) for p in consolidate]},
+        {"key": "B", **BLOCKS["B"], "maps": [clean(c) for c in stretch[:1]], "alternative": [clean(c) for c in stretch[1:2]]},
+        {"key": "C", **BLOCKS["C"], "maps": [clean(c, dominant=c["dominant"]) for c in variety]},
+        {"key": "D", **BLOCKS["D"], "maps": [clean(c) for c in dt], "note": f"tecto DT: {dt_lim.get('stars_ceiling')}★, AR até {ar_cap}" if dt else "sem mapas DT dentro dos teus limites esta semana"},
+    ]
+    for s in sessions:
+        s["blocks"] = [{**WARMUP, "maps": [mine(p, best_acc=p["accuracy"]) for p in warm]} if s["key"] != "D" else {**WARMUP, "what": "2 mapas de ~4★ em DT, sem procurar score: habitua a mão à velocidade.", "maps": []},
+                       {"name": "Bloco principal", "minutes": s["minutes"] - WARMUP["minutes"] - CLOSING["minutes"], "what": s["goal"], "maps": []}, CLOSING]
+    return {"week": week_id(today), "week_start": ws.isoformat(), "created_at": datetime.now().isoformat(), "stats": stats,
+            "limits": {"ar_cap": ar_cap, "stars_ceiling_nomod": limits.get("stars_ceiling"), "stars_ceiling_dt": dt_lim.get("stars_ceiling")},
+            "test": {"band": band, "maps": [clean(c) for c in test],
+                     "how": "Joga cada mapa pela 1.ª vez, sem mods. Só a 1.ª jogada conta (accuracy e se passaste); depois podes repetir à vontade."},
+            "sessions": sessions}

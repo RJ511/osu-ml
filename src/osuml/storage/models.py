@@ -311,6 +311,11 @@ prediction_log = Table(
     Column("best_acc", Float),
     Column("n_deaths_possible", Integer),
     Column("n_restarts", Integer),
+    Column("mods", String(32)),  # mods da sugestão ("" / NULL = sem mods): o resultado só conta jogadas com exatamente esses mods
+    Column("focus", String(16)),  # skill | equilibrado | pp
+    Column("pp_est", Float),  # pp oficial esperado se passasse (modelo do pp)
+    Column("pp_gain", Float),  # ganho previsto nos pp totais se passasse
+    Column("best_pp", Float),  # pp do melhor passe depois de recomendado (com esses mods)
 )
 Index("ix_prediction_log_user_map", prediction_log.c.user_id, prediction_log.c.beatmap_id)
 
@@ -319,4 +324,77 @@ shadow_state = Table(
     metadata,
     Column("user_id", BigInteger, primary_key=True, autoincrement=False),
     Column("last_seen_at", DateTime, nullable=False),  # jogadas com first_seen_at <= isto já foram avaliadas
+)
+
+
+# Tags votadas pelos jogadores (lazer), recolhidas do mirror hinai por SET (`osuml tags collect`).
+tag_dictionary = Table(
+    "tag_dictionary",
+    metadata,
+    Column("tag_id", Integer, primary_key=True, autoincrement=False),
+    Column("name", String(128), nullable=False),  # ex.: skillset/jumps
+    Column("ruleset_id", Integer),
+    Column("description", String(1024)),
+)
+
+beatmap_tags = Table(
+    "beatmap_tags",
+    metadata,
+    Column("beatmap_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("tag_id", Integer, primary_key=True, autoincrement=False),
+    Column("votes", Integer, nullable=False),
+    Column("beatmapset_id", BigInteger, nullable=False),
+    Column("fetched_at", DateTime, nullable=False),
+    Column("source", String(32), nullable=False),
+)
+
+tag_fetches = Table(
+    "tag_fetches",
+    metadata,
+    Column("beatmapset_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("status", String(16), nullable=False),  # ok | not_found
+    Column("n_beatmaps", Integer),
+    Column("n_tags", Integer),
+    Column("http_status", Integer),
+    Column("source", String(32), nullable=False),
+    Column("fetched_at", DateTime, nullable=False),
+)
+
+tag_queue = Table(
+    "tag_queue",
+    metadata,
+    Column("beatmapset_id", BigInteger, primary_key=True, autoincrement=False),
+    Column("phase", String(2), nullable=False),  # B candidatos · C jogadores parecidos · A amostra do catálogo
+    Column("priority", Integer, nullable=False),
+    Column("added_at", DateTime, nullable=False),
+)
+
+tag_runs = Table(
+    "tag_runs",
+    metadata,
+    Column("run_id", Integer, primary_key=True, autoincrement=True),
+    Column("started_at", DateTime, nullable=False),
+    Column("finished_at", DateTime),
+    Column("trigger", String(16), nullable=False),  # scheduled | manual
+    Column("planned", Integer),
+    Column("ok", Integer),
+    Column("not_found", Integer),
+    Column("requests", Integer),
+    Column("guard_checks", Integer),
+    Column("status_counts", JSONType),  # {"200": n, "404": n, "429": n, ...}
+    Column("avg_ms", Float),
+    Column("max_ms", Float),
+    Column("aborted", String(256)),
+    Column("note", String(256)),
+)
+
+tag_guard_log = Table(
+    "tag_guard_log",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("at", DateTime, nullable=False),
+    Column("pressure", Boolean, nullable=False),
+    Column("pain_60s", Integer),
+    Column("pain_limit", Integer),
+    Column("retry_after_s", Integer),
 )

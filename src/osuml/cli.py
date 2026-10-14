@@ -244,7 +244,7 @@ def cmd_analyze(args: argparse.Namespace, settings: Settings) -> int:
 
     proc = settings.processed_dir
     scores = [Path(f) for f in args.scores] if args.scores else sorted((proc / "dump_scores" / "v1").glob("dump_scores_*.parquet"))
-    if not scores and args.analysis_step not in ("pass-model", "reach-model", "similarity", "export-api-plays", "reach-api-check", "reach-calibrate", "acc-model", "pass-calibrate", "fail-points"):  # esses leem os Parquet de --inputs
+    if not scores and args.analysis_step not in ("pass-model", "reach-model", "similarity", "export-api-plays", "reach-api-check", "reach-calibrate", "acc-model", "pass-calibrate", "fail-points", "dt-check"):  # esses leem os Parquet de --inputs
         print("Sem scores de dump: corre primeiro `osuml dump-scores`.", file=sys.stderr)
         return 1
     out_dir = Path(args.out_dir) if args.out_dir else proc / "analysis" / args.analysis_step.replace("-", "_")
@@ -266,6 +266,25 @@ def cmd_analyze(args: argparse.Namespace, settings: Settings) -> int:
         inputs = Path(args.inputs) if args.inputs else out_dir / "inputs"
         out = run_acc_model(inputs, out_dir, args.version, rounds=args.rounds, threads=args.threads, cap_rows=args.cap_rows,
                             cap_train=args.cap_train, seed=args.seed, progress_path=progress, sample_pct=args.sample_pct)
+    elif args.analysis_step == "dt-check":
+        from .analysis.dt_check import run_dt_check
+        from .recommend.core import Recommender
+
+        st = _store(settings)
+        rec = Recommender(st, proc / "recommend" / "index", proc / "recommend" / "models", log_predictions=False)
+        from .recommend.modsview import normalize_mods
+
+        mk = normalize_mods(args.mods)
+        if not mk:
+            print("--mods inválido (ex.: DT, HD, DT,HD, HD,HR)", file=sys.stderr)
+            return 1
+        out = run_dt_check(st, rec, proc / "recommend" / "models", mods=mk, apply=args.apply)
+    elif args.analysis_step == "pp-model":
+        from .analysis.pp_model import run_pp_model
+
+        out = run_pp_model(scores, proc / "catalog" / "v2" / "map_attributes.parquet", out_dir, proc / "recommend" / "models", args.version,
+                           rounds=args.rounds, threads=args.threads, seed=args.seed, modulus_random=args.modulus_random,
+                           modulus_top=args.modulus_top, progress_path=progress)
     elif args.analysis_step == "fail-points":
         from .analysis.fail_points import analyze
 
@@ -458,6 +477,21 @@ def _recommend_tools(args: argparse.Namespace, settings: Settings) -> int:
         names = ", ".join(p["username"] for p in rec.players()) or "nenhum"
         print(f"Jogador não encontrado na base de dados. Disponíveis: {names}", file=sys.stderr)
         return 1
+    if step == "history":
+        from .recommend.log import history, report_mods
+
+        rows = history(rec.store, found[0], limit=args.limit)
+        print(f"Sugestões registadas para {found[1]}: {len(rows)} (as {min(len(rows), args.limit)} mais recentes)")
+        for r in rows:
+            if not r["played"]:
+                res = "ainda não jogada"
+            else:
+                best = "-" if r["best_acc"] is None else str(round(r["best_acc"] * 100, 1)) + "%"
+                pp = "" if r["best_pp"] is None else ", " + str(round(r["best_pp"])) + " pp"
+                res = str(r["attempts"]) + " tent., passou=" + str(int(bool(r["passed"]))) + ", melhor " + best + pp
+            print(f"  {str(r['created_at'])[:16]} [{r['mods'] or 'NM'}/{r['focus'] or '-'}/{r['tier']}] {r['beatmap_id']:>8} {r['label'][:52]:52s} prev P={0 if r['p_pass'] is None else r['p_pass']:.2f} -> {res}")
+        print("\nResumo por mods:", json.dumps(report_mods(rec.store, found[0]), ensure_ascii=False))
+        return 0
     if step == "suggest":
         res = rec.recommend(found[0], [x.strip() for x in args.skills.split(",") if x.strip()], n=args.n)
         if "error" in res:
@@ -547,7 +581,8 @@ def cmd_panel(args: argparse.Namespace, settings: Settings) -> int:
 
     recommender = Recommender(store, settings.processed_dir / "recommend" / "index", settings.processed_dir / "recommend" / "models",
                               feedback_file=settings.data_dir / "feedback" / "recomendacoes_feedback.txt", log_predictions=True)
-    server, _ = make_dashboard(ctrl, cat_ctrl, args.port, checker_factory, jobs, recommender)
+    server, _ = make_dashboard(ctrl, cat_ctrl, args.port, checker_factory, jobs, recommender,
+                              goal_path=settings.data_dir / "control" / "goal.json", tags_monitor=_tags_monitor(settings, store))
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Painel em {url}  (Ctrl+C para sair; nenhum pedido à API é feito até carregares em 'Iniciar' na Recolha)")
     if args.open:
@@ -674,6 +709,8 @@ def cmd_maintenance(args: argparse.Namespace, settings: Settings) -> int:
     step = args.maintenance_step
     if step == "dumps-check":
         out = mt.dumps_check(settings, window_days=args.window_days, force=args.force)
+    elif step == "maps-load":
+        out = mt.maps_load(settings, _store(settings), window_days=args.window_days, force=args.force, categorize=not args.no_categorize)
     elif step == "retrain-plan":
         out = mt.retrain_plan(settings)
         if args.prepare and out.get("pending"):
@@ -721,9 +758,96 @@ def cmd_categorize(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _tags_monitor(settings: Settings, store):
+    from .tags.collect import TagCollector
+    from .tags.monitor import TagsMonitor
+
+    return TagsMonitor(store, settings.data_dir / "control", collector_factory=lambda: TagCollector(store))
+
+
+def cmd_tags(args: argparse.Namespace, settings: Settings) -> int:
+    """Tags votadas dos mapas (mirror hinai; 0 pedidos à osu!API). Ver `osuml/tags/collect.py` (regras de boa conduta)."""
+    from pathlib import Path
+
+    from .progress import Progress
+    from .tags.collect import TagCollector, summary
+
+    from .tags import queue as tq
+    from .tags.monitor import DAILY_CAP, snapshot
+
+    store = _store(settings)
+    control = settings.data_dir / "control"
+    if args.tags_command == "status":
+        print(json.dumps({**summary(store), **snapshot(store, paused=(control / "TAGS_PAUSE").exists())}, indent=2, ensure_ascii=False, default=str))
+        return 0
+    if args.tags_command == "plan":
+        out: dict = {}
+        if args.phase in ("B", "all"):
+            from .recommend.core import Recommender
+
+            rec = Recommender(store, settings.processed_dir / "recommend" / "index", settings.processed_dir / "recommend" / "models",
+                              feedback_file=settings.data_dir / "feedback" / "recomendacoes_feedback.txt", log_predictions=False)
+            out["B"] = tq.enqueue(store, tq.plan_candidates(rec, args.user_id, args.per_skill), "B")
+        if args.phase in ("C", "all"):
+            out["C"] = tq.enqueue(store, tq.plan_neighbors(store, args.user_id, args.neighbors), "C")
+        if args.phase in ("A", "all"):
+            out["A"] = tq.enqueue(store, tq.plan_sample(settings.processed_dir / "recommend" / "index" / "labels.parquet", args.sample, args.seed), "A")
+        print(json.dumps({"enqueued": out, "queue": tq.queue_counts(store)}, indent=2))
+        return 0
+    if args.tags_command == "guard":
+        col = TagCollector(store)
+        try:
+            print(json.dumps(col.guard(), indent=2))
+        finally:
+            col.close()
+        return 0
+    if args.tags_command == "run":
+        import random as _random
+        import time as _time
+
+        from .api.lock import ApiLock
+
+        if args.max_start_delay > 0:
+            _time.sleep(_random.uniform(0, args.max_start_delay))  # polling irregular
+        lock = ApiLock(control / "tags.lock")
+        if not lock.acquire(timeout=1):
+            print("Outra execução de tags está em curso; a sair.", file=sys.stderr)
+            return 3
+        col = TagCollector(store, min_interval=args.interval, raw_dir=settings.raw_dir / "hinai_tags", endpoint=args.endpoint,
+                           progress=Progress(Path(args.progress), "tags: execução", 0, "sets") if args.progress else None)
+        paused_fn = lambda: (control / "TAGS_PAUSE").exists()  # noqa: E731
+        try:
+            col.load_dictionary(settings.raw_dir / "probe_tags" / "tags.json")
+            if args.session:
+                out = col.run_session(daily_cap=args.daily_cap, max_minutes=args.max_minutes, max_wait_guard_s=args.wait_guard_min * 60,
+                                      paused_fn=paused_fn, trigger=args.trigger)
+            else:
+                out = col.run_queue(max_sets=args.max_sets, daily_cap=args.daily_cap, max_wait_guard_s=args.wait_guard_min * 60,
+                                    paused=paused_fn(), trigger=args.trigger)
+        finally:
+            col.close()
+            lock.release()
+        print(json.dumps({**out, "daily_cap": args.daily_cap}, indent=2, ensure_ascii=False))
+        return 0 if not out["aborted"] else 2
+    prog = Progress(Path(args.progress), "tags: a planear", 0, "sets") if args.progress else None
+    col = TagCollector(store, min_interval=args.interval, raw_dir=settings.raw_dir / "hinai_tags", progress=prog)
+    try:
+        loaded = col.load_dictionary(settings.raw_dir / "probe_tags" / "tags.json")
+        plan = col.plan([int(u) for u in args.user_ids])
+        if args.dry_run:
+            print(json.dumps({"dictionary": loaded, "sets_to_fetch": len(plan), "would_fetch_now": min(len(plan), args.max_sets),
+                              "requests_made": 0}, indent=2))
+            return 0
+        out = col.run(plan, max_sets=args.max_sets, max_wait_guard_s=args.wait_guard_min * 60)
+    finally:
+        col.close()
+    print(json.dumps({**out, "summary": summary(store)}, indent=2, ensure_ascii=False))
+    return 0 if not out["aborted"] else 2
+
+
 def _handlers() -> dict:
     return {"collect": cmd_collect, "status": cmd_status, "export": cmd_export, "maps": cmd_maps,
-            "sync-s3": cmd_sync_s3, "dump-scores": cmd_dump_scores, "map-catalog": cmd_map_catalog, "analyze": cmd_analyze, "recommend": cmd_recommend, "dump-table": cmd_dump_table, "panel": cmd_panel, "poll": cmd_poll, "categorize": cmd_categorize, "eval-log": cmd_eval_log, "maintenance": cmd_maintenance}
+            "sync-s3": cmd_sync_s3, "dump-scores": cmd_dump_scores, "map-catalog": cmd_map_catalog, "analyze": cmd_analyze, "recommend": cmd_recommend, "dump-table": cmd_dump_table, "panel": cmd_panel, "poll": cmd_poll, "categorize": cmd_categorize, "eval-log": cmd_eval_log, "maintenance": cmd_maintenance, "tags": cmd_tags}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -784,6 +908,36 @@ def main(argv: list[str] | None = None) -> int:
     ct.add_argument("--reference-version", default="v3", help="pool de referência a usar (omissão: v3)")
     ct.add_argument("--open", action="store_true", help="abre o navegador")
 
+    tg = sub.add_parser("tags", help="tags votadas dos mapas, do mirror hinai (1 pedido por set; respeita o guard; 0 pedidos à osu!API)")
+    tsub = tg.add_subparsers(dest="tags_command", required=True)
+    tsub.add_parser("status", help="o que já foi recolhido, a fila, o teto diário e o estado do guard (0 pedidos)")
+    tg_plan = tsub.add_parser("plan", help="põe sets na fila por fase (B candidatos · C jogadores parecidos · A amostra); 0 pedidos")
+    tg_plan.add_argument("--phase", choices=["B", "C", "A", "all"], default="all")
+    tg_plan.add_argument("--user-id", type=int, default=13745526)
+    tg_plan.add_argument("--per-skill", type=int, default=250, help="B: sugestões por skill")
+    tg_plan.add_argument("--neighbors", type=int, default=20, help="C: nº de jogadores parecidos")
+    tg_plan.add_argument("--sample", type=int, default=3000, help="A: nº de sets da amostra do catálogo")
+    tg_plan.add_argument("--seed", type=int, default=42)
+    tsub.add_parser("guard", help="1 pedido ao guard do mirror e regista o estado")
+    tr = tsub.add_parser("run", help="uma execução sobre a fila (respeita pausa, teto diário e guard)")
+    tr.add_argument("--max-sets", type=int, default=100)
+    tr.add_argument("--daily-cap", type=int, default=1000)
+    tr.add_argument("--interval", type=float, default=1.0)
+    tr.add_argument("--wait-guard-min", type=float, default=30.0)
+    tr.add_argument("--max-start-delay", type=int, default=0, help="jitter aleatório (s) antes de começar")
+    tr.add_argument("--trigger", default="manual", help="scheduled | manual")
+    tr.add_argument("--endpoint", choices=["raw", "details"], default="raw",
+                    help="raw = /v3/osu/beatmaps/s/{id} (local no mirror; votos ~80 %%); details = /details (votos iguais à osu!API)")
+    tr.add_argument("--session", action="store_true", help="sessão contínua guiada pelo semáforo do guard (em vez de um lote de --max-sets)")
+    tr.add_argument("--max-minutes", type=float, default=110.0, help="duração máxima de uma sessão")
+    tr.add_argument("--progress", default=None)
+    tc = tsub.add_parser("collect", help="recolhe as tags dos sets ranked/loved dos mapas jogados pelos jogadores indicados")
+    tc.add_argument("--user-ids", nargs="+", required=True, help="user_id dos jogadores (1.º = prioridade)")
+    tc.add_argument("--max-sets", type=int, default=1000, help="teto de sets por execução (omissão: 1000)")
+    tc.add_argument("--interval", type=float, default=1.0, help="s entre pedidos (nunca abaixo de 1,0)")
+    tc.add_argument("--wait-guard-min", type=float, default=30.0, help="máx. de minutos à espera de o guard deixar de indicar pressão")
+    tc.add_argument("--progress", default=None, help="ficheiro de progresso (para o separador Tarefas do painel)")
+    tc.add_argument("--dry-run", action="store_true", help="só mostra o plano (0 pedidos)")
     mt_ = sub.add_parser("maintenance", help="manutenção periódica do recomendador (0 pedidos à osu!API): simulação mensal, dumps novos, pacote S3, retreino")
     msub = mt_.add_subparsers(dest="maintenance_step", required=True)
     msub.add_parser("status", help="estado da manutenção (último treino, pedido de retreino, pacote enviado)")
@@ -791,6 +945,10 @@ def main(argv: list[str] | None = None) -> int:
     dc = msub.add_parser("dumps-check", help="procura um dump novo completo no data.ppy.sh (só na 1.ª semana do mês) e marca o retreino como pendente")
     dc.add_argument("--window-days", type=int, default=7)
     dc.add_argument("--force", action="store_true", help="ignora a janela da 1.ª semana")
+    ml = msub.add_parser("maps-load", help="carrega os mapas do dump mensal de .osu (descarrega, importa por MD5, recategoriza; 0 pedidos à osu!API)")
+    ml.add_argument("--window-days", type=int, default=31)
+    ml.add_argument("--force", action="store_true", help="ignora a janela da 1.ª semana")
+    ml.add_argument("--no-categorize", action="store_true", help="só importa os ficheiros, sem recategorizar")
     pc = msub.add_parser("pack-check", help="decide se o pacote do S3 está desatualizado; com --upload reconstrói e envia (bucket privado)")
     pc.add_argument("--upload", action="store_true")
     pc.add_argument("--players", nargs="*", default=None, help="omissão: os do último pacote (PXD Vieira, gaaGOD)")
@@ -856,6 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
                       ("export-api-plays", "exporta os scores da BD (API) para Parquet, para avaliar o modelo pass/fail"),
                       ("reach-api-check", "valida os modelos >=88/93 %% com os jogadores da API (BD local, 0 pedidos)"),
                       ("acc-model", "modelo da accuracy esperada SE PASSAR (mediana do melhor passe do par) para jogador+mapa (treinar no RunPod)"),
+                      ("dt-check", "valida os modelos com DT (vista DT dos mapas) com jogadas reais da API e ajusta P(passar)/accuracy (calibration_dt.json com --apply; 0 pedidos)"),
+                      ("pp-model", "modelo do pp OFICIAL (mapa, mods, accuracy, regime) aprendido dos dumps; guarda recommend/models/pp_official.txt (0 pedidos)"),
                       ("fail-points", "onde e porquê o jogador falha: progresso, morte (HP) vs reinício e o trecho do mapa (BD local, 0 pedidos)"),
                       ("pass-calibrate", "valida e calibra P(passar) e a accuracy se passar com jogadores da API (guarda calibration_pass_acc.json; 0 pedidos)"),
                       ("reach-calibrate", "calibra os modelos >=88/93 %% para jogadores da API (guarda calibration.json ao lado dos modelos; 0 pedidos)"),
@@ -891,6 +1051,14 @@ def main(argv: list[str] | None = None) -> int:
             a.add_argument("--sample-pct", type=int, default=100)
         if name == "fail-points":
             a.add_argument("--bundle", default=None, help=".osu dos mapas (omissão: catalog/v1/osu_subset.tar.gz)")
+        if name == "dt-check":
+            a.add_argument("--apply", action="store_true", help="grava models/calibration_<mods>.json")
+            a.add_argument("--mods", default="DT", help="combinação de mods a validar (DT, HD, DT,HD, HD,HR, ...)")
+        if name == "pp-model":
+            a.add_argument("--rounds", type=int, default=700)
+            a.add_argument("--threads", type=int, default=4)
+            a.add_argument("--modulus-random", type=int, default=20, help="1 em N scores dos dumps aleatórios")
+            a.add_argument("--modulus-top", type=int, default=100, help="1 em N scores do top_10000")
         if name == "acc-model":
             a.add_argument("--inputs", default=None, help="pasta com playcount, dump_scores e map_attributes (.parquet)")
             a.add_argument("--rounds", type=int, default=500)
@@ -939,6 +1107,7 @@ def main(argv: list[str] | None = None) -> int:
     for nm, hlp in (("check", "verifica a pasta de dados (modelos, índice, jogadores) e diz que modelo está carregado"),
                     ("serve", "abre a aplicação local (escolher jogador + skills, ver mapas, dar feedback)"),
                     ("suggest", "sugestões no terminal para um jogador da base de dados"),
+                    ("history", "sugestões registadas para um jogador e o que aconteceu depois, por mods"),
                     ("feedback", "regista feedback (serve / nao_serve) de um mapa, no ficheiro de texto e na BD")):
         a = rsub.add_parser(nm, help=hlp)
         a.add_argument("--pack", default=None, help="pasta do pacote de dados (omissão: ./pack se existir, senão os dados do projeto)")
@@ -953,6 +1122,8 @@ def main(argv: list[str] | None = None) -> int:
             a.add_argument("--skills", default="speed" if nm == "suggest" else "", help="aim,speed,stamina,reading (uma ou várias)")
         if nm == "suggest":
             a.add_argument("-n", type=int, default=20)
+        if nm == "history":
+            a.add_argument("--limit", type=int, default=100)
         if nm == "feedback":
             a.add_argument("--beatmap", type=int, required=True)
             a.add_argument("--verdict", choices=["serve", "nao_serve"], required=True)

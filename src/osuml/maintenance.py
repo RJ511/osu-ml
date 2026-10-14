@@ -30,7 +30,7 @@ ACC_DELTA = 0.01          # 1 ponto de accuracy
 PASS_DELTA = 0.15         # no logit de P(passar)
 # treinado até aqui (verificado em 2026-09-25): 6 dumps aleatórios + top_10000 de 2026_09_01
 SEED_STATE = {"trained_snapshot": "2026_09_01", "random_snapshots": ["2026_04_01", "2026_05_01", "2026_06_01", "2026_07_13", "2026_08_01", "2026_09_01"],
-              "top_snapshot": "2026_09_01"}
+              "top_snapshot": "2026_09_01", "maps_loaded_snapshot": "2026_09_01"}
 
 _PERF = re.compile(r"(\d{4}_\d{2}_\d{2})_performance_osu_(random_10000|top_10000)\.tar\.bz2")
 _FILES = re.compile(r"(\d{4}_\d{2}_\d{2})_osu_files\.tar\.bz2")
@@ -123,6 +123,118 @@ def dumps_check(settings, *, today: date | None = None, window_days: int = WINDO
     state["dumps"] = {"last_checked": pending["found_at"], "latest": latest}
     save_state(settings, state)
     log_event(settings, {"task": "dumps-check", **{k: v for k, v in out.items() if k != "pending"}, "pending_snapshot": latest})
+    return out
+
+
+# ------------------------------------------------------------------ carregamento mensal dos mapas (.osu)
+MAPS_DUMP_DIR = ("external", "osu_files")
+MAPS_LOAD_WINDOW_DAYS = 31  # o dump nem sempre sai no dia 1 (ex.: 2026_07_13): consulta-se todos os dias do mês, a listagem é leve
+MIN_FREE_FACTOR = 2.5   # espaço livre exigido = 2,5 x o tamanho do dump (o ficheiro + margem)
+
+
+def latest_files_snapshot(listing: str) -> str | None:
+    """Data (AAAA_MM_DD) do dump de `.osu` mais recente da listagem (só precisa do osu_files, não do treino)."""
+    snaps = sorted(set(_FILES.findall(listing)))
+    return snaps[-1] if snaps else None
+
+
+def download_dump(snapshot: str, dest_dir: Path, *, base_url: str = DUMPS_URL, opener: Callable[..., Any] | None = None,
+                  free_bytes: Callable[[Path], int] | None = None) -> Path:
+    """Descarrega `<snapshot>_osu_files.tar.bz2` (oficial, data.ppy.sh) em streaming para um `.part` e só depois o renomeia.
+    Recusa se não houver espaço livre; confere o tamanho recebido com o `Content-Length`."""
+    import shutil
+
+    name = f"{snapshot}_osu_files.tar.bz2"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    final, part = dest_dir / name, dest_dir / (name + ".part")
+    if final.exists():
+        return final
+    open_url = opener or (lambda u: urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "osuml-maintenance/1.0"}), timeout=120))
+    with open_url(base_url + name) as resp:
+        size = int(resp.headers.get("Content-Length") or 0)
+        free = (free_bytes or (lambda p: shutil.disk_usage(p).free))(dest_dir)
+        if size and free < size * MIN_FREE_FACTOR:
+            raise RuntimeError(f"pouco espaço livre: {free / 1e9:.1f} GB (preciso de ~{size * MIN_FREE_FACTOR / 1e9:.1f} GB)")
+        got = 0
+        with part.open("wb") as f:
+            while chunk := resp.read(1 << 20):
+                f.write(chunk)
+                got += len(chunk)
+    if size and got != size:
+        part.unlink(missing_ok=True)
+        raise RuntimeError(f"download incompleto: {got} de {size} bytes")
+    part.replace(final)
+    return final
+
+
+def _categorize_all(settings, store) -> dict[str, Any]:
+    """Categoriza (sem pedidos) todos os pares mapa×mods referenciados; o que já está categorizado vem da cache e os
+    `no_file` cujo ficheiro apareceu são recalculados."""
+    from .beatmaps.skills import ReferenceScale, SkillScorer
+    from .categorize.core import CategorizeController, MapCategorizer
+
+    ref = None
+    for version in ("v3", "v2", "v1"):
+        cand = settings.processed_dir / version / f"reference_pool_{version}.parquet"
+        if cand.exists():
+            ref = cand
+            break
+    if ref is None:
+        return {"skipped": "sem pool de referência"}
+    ctrl = CategorizeController(store, MapCategorizer(store, SkillScorer(ReferenceScale.from_parquet(ref))))
+    err = ctrl.start()
+    if err:
+        return {"skipped": err}
+    ctrl.wait()
+    return {"status": ctrl.status, "message": ctrl.message, **ctrl.counts}
+
+
+def maps_load(settings, store, *, today: date | None = None, window_days: int = MAPS_LOAD_WINDOW_DAYS, force: bool = False,
+              categorize: bool = True, fetch: Callable[[], str] = fetch_listing, downloader: Callable[..., Path] = download_dump,
+              wanted_fn: Callable[[Any], Any] | None = None, importer: Callable[..., dict] | None = None,
+              categorizer: Callable[..., dict] | None = None) -> dict[str, Any]:
+    """Carrega os mapas do dump mensal de `.osu` (0 pedidos à osu!API; só data.ppy.sh, fonte oficial já usada no projeto).
+
+    Consulta a listagem todos os dias (janela de `MAPS_LOAD_WINDOW_DAYS`) e só age se houver um dump mais recente que o último carregado **e** mapas referenciados sem
+    ficheiro. Descarrega, importa por MD5, recategoriza e só então regista o dump como carregado (se algo falhar, repete-se
+    no dia seguinte). Mantém só o dump mais recente em `data/external/osu_files/`."""
+    from .beatmaps.acquire import files_report, import_from_path, wanted_beatmaps
+
+    today = today or date.today()
+    state = load_state(settings)
+    loaded = state.get("maps_loaded_snapshot") or SEED_STATE["maps_loaded_snapshot"]
+    out: dict[str, Any] = {"today": today.isoformat(), "maps_loaded_snapshot": loaded, "checked": False, "loaded": False}
+    if today.day > window_days and not force:
+        out["reason"] = f"fora da janela (dias 1–{window_days})"
+        return out
+    latest = latest_files_snapshot(fetch())
+    out.update(checked=True, latest_snapshot=latest)
+    if latest is None or latest <= loaded:
+        out["reason"] = "sem dump de mapas novo" if latest else "listagem sem dump de mapas"
+        return out
+    wanted = (wanted_fn or wanted_beatmaps)(store)
+    out["missing_before"] = len(wanted)
+    dump_dir = settings.data_dir.joinpath(*MAPS_DUMP_DIR)
+    if len(wanted):
+        path = downloader(latest, dump_dir)
+        if importer is not None:
+            out["import"] = importer(store, path)
+        else:
+            out["import"] = import_from_path(store, path, wanted, "dump").as_dict()
+            out["missing_after"] = files_report(store, None).get("missing")
+        for old in dump_dir.glob("*_osu_files.tar.bz2"):  # só o mais recente (os antigos são re-descarregáveis)
+            if old.name != path.name:
+                old.unlink(missing_ok=True)
+    else:
+        out["import"] = "nada em falta: sem download"
+    if categorize:
+        out["categorize"] = (categorizer or _categorize_all)(settings, store)
+    state["maps_loaded_snapshot"] = latest
+    state["maps_load"] = {"snapshot": latest, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          "missing_before": out["missing_before"], "missing_after": out.get("missing_after")}
+    save_state(settings, state)
+    out["loaded"] = True
+    log_event(settings, {"task": "maps-load", **{k: v for k, v in out.items() if k != "categorize"}})
     return out
 
 

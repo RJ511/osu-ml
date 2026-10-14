@@ -28,7 +28,8 @@ def _now() -> datetime:
     return utcnow()
 
 
-def log_recommendations(store, user_id: int, items: list[dict[str, Any]], skills: list[str], model_fp: str | None, when: datetime | None = None) -> int:
+def log_recommendations(store, user_id: int, items: list[dict[str, Any]], skills: list[str], model_fp: str | None, when: datetime | None = None,
+                        focus: str | None = None) -> int:
     """Grava as sugestões devolvidas (uma linha por mapa). Regista os valores do MODELO (`*_model`, antes da correção por jogador) para o relatório e a estimativa
     dessa correção não ficarem circulares."""
     from ..storage import models as m
@@ -36,7 +37,8 @@ def log_recommendations(store, user_id: int, items: list[dict[str, Any]], skills
     when = when or _now()
     rows = [{"user_id": int(user_id), "beatmap_id": int(it["beatmap_id"]), "kind": "recomendacao", "model_fp": model_fp, "created_at": when, "asof": when,
              "skills": ",".join(skills), "tier": it.get("tier"), "p_pass": it.get("p_pass_model", it.get("p_pass")), "acc_pass": it.get("acc_pass_model", it.get("acc_pass")), "p_pass_raw": it.get("p_pass_raw"),
-             "acc_pass_raw": it.get("acc_pass_raw"), "challenge": max(it["delta"].values()) if it.get("delta") else None} for it in items]
+             "acc_pass_raw": it.get("acc_pass_raw"), "challenge": max(it["delta"].values()) if it.get("delta") else None,
+             "mods": it.get("mods") or "", "focus": focus, "pp_est": it.get("pp_est"), "pp_gain": it.get("pp_gain")} for it in items]
     if rows:
         with store.engine.begin() as c:
             c.execute(m.prediction_log.insert(), rows)
@@ -49,7 +51,7 @@ def _plays(store, user_id: int, beatmap_id: int, after: datetime | None = None, 
     from ..storage import models as m
 
     sc = m.scores.c
-    q = select(sc.passed, sc.accuracy, sc.statistics, sc.mod_acronyms, sc.legacy_score_id, sc.ended_at).where(sc.user_id == user_id, sc.beatmap_id == beatmap_id).order_by(sc.ended_at)
+    q = select(sc.passed, sc.accuracy, sc.statistics, sc.mod_acronyms, sc.legacy_score_id, sc.ended_at, sc.pp).where(sc.user_id == user_id, sc.beatmap_id == beatmap_id).order_by(sc.ended_at)
     if after is not None:
         q = q.where(sc.ended_at > after)
     if before is not None:
@@ -75,7 +77,8 @@ def outcome(plays, hp: float | None) -> dict[str, Any] | None:
             restarts += k == "reinicio_certo"
     return {"n_attempts": len(plays), "n_lazer_attempts": len(lazer), "passed": bool(any(p[0] for p in basis)),
             "first_try_passed": bool(basis[0][0]) if lazer else None, "best_acc": float(max(p[1] or 0.0 for p in passes)) if passes else None,
-            "n_deaths_possible": deaths, "n_restarts": restarts}
+            "n_deaths_possible": deaths, "n_restarts": restarts,
+            "best_pp": max((p[6] for p in passes if len(p) > 6 and p[6] is not None), default=None)}
 
 
 def _hp_of(rec, beatmap_id: int) -> float | None:
@@ -97,9 +100,13 @@ def link_recommendations(store, rec, now: datetime | None = None) -> int:
     pl = m.prediction_log
     n = 0
     with store.engine.connect() as c:
-        pending = c.execute(select(pl.c.id, pl.c.user_id, pl.c.beatmap_id, pl.c.created_at).where(pl.c.kind == "recomendacao", pl.c.evaluated_at.is_(None))).all()
-    for rid, uid, bid, created in pending:
-        oc = outcome(_plays(store, uid, bid, after=created), _hp_of(rec, bid))
+        pending = c.execute(select(pl.c.id, pl.c.user_id, pl.c.beatmap_id, pl.c.created_at, pl.c.mods).where(pl.c.kind == "recomendacao", pl.c.evaluated_at.is_(None))).all()
+    from .modsview import stable_key
+
+    for rid, uid, bid, created, mods in pending:
+        # só contam as jogadas com EXATAMENTE os mods da sugestão (o resultado de uma sugestão DT é o que aconteceu com DT)
+        plays = [p for p in _plays(store, uid, bid, after=created) if stable_key(p[3]) == (mods or "")]
+        oc = outcome(plays, _hp_of(rec, bid))
         if oc:
             with store.engine.begin() as c:
                 c.execute(pl.update().where(pl.c.id == rid).values(evaluated_at=now or _now(), **oc))
@@ -200,6 +207,7 @@ def report(store, *, since: datetime | None = None) -> dict[str, Any]:
     with store.engine.connect() as c:
         rows = [dict(r) for r in c.execute(q).mappings().all()]
         names = dict(c.execute(select(m.users.c.user_id, m.users.c.username)).all())
+    rows = [r for r in rows if not (r.get("mods") or "")]  # a calibração do modelo nomod não se mistura com sugestões DT/HD/... (ver `report_mods`)
     out: dict[str, Any] = {"n_rows": len(rows), "by_kind": {k: sum(r["kind"] == k for r in rows) for k in ("sombra", "recomendacao")}}
     lz = [r for r in rows if (r["n_lazer_attempts"] or 0) > 0 and r["p_pass"] is not None]
     if len(lz) >= 20:
@@ -226,4 +234,49 @@ def report(store, *, since: datetime | None = None) -> dict[str, Any]:
     if rec_rows:
         out["recommended"] = {"n": len(rec_rows), "passed": round(float(np.mean([bool(r["passed"]) for r in rec_rows])), 3),
                               "predicted_p_pass": round(float(np.mean([r["p_pass"] for r in rec_rows if r["p_pass"] is not None])), 3)}
+    return out
+
+
+def history(store, user_id: int | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    """Sugestões registadas (mais recentes primeiro) com o que aconteceu depois, por mods."""
+    from sqlalchemy import select
+
+    from ..storage import models as m
+
+    pl = m.prediction_log
+    q = (select(pl, m.beatmapsets.c.artist, m.beatmapsets.c.title, m.beatmaps.c.version)
+         .select_from(pl.outerjoin(m.beatmaps, m.beatmaps.c.beatmap_id == pl.c.beatmap_id)
+                      .outerjoin(m.beatmapsets, m.beatmapsets.c.beatmapset_id == m.beatmaps.c.beatmapset_id))
+         .where(pl.c.kind == "recomendacao").order_by(pl.c.created_at.desc()).limit(limit))
+    if user_id is not None:
+        q = q.where(pl.c.user_id == user_id)
+    with store.engine.connect() as c:
+        rows = c.execute(q).mappings().all()
+    return [{"id": r["id"], "created_at": r["created_at"], "beatmap_id": r["beatmap_id"], "mods": r["mods"] or "", "focus": r["focus"], "tier": r["tier"],
+             "label": f"{r['artist'] or ''} – {r['title'] or ''} [{r['version'] or ''}]".strip(" –[]") or f"mapa #{r['beatmap_id']}",
+             "p_pass": r["p_pass"], "acc_pass": r["acc_pass"], "pp_est": r["pp_est"], "pp_gain": r["pp_gain"],
+             "played": r["evaluated_at"] is not None, "attempts": r["n_attempts"], "passed": r["passed"], "first_try": r["first_try_passed"],
+             "best_acc": r["best_acc"], "best_pp": r["best_pp"]} for r in rows]
+
+
+def report_mods(store, user_id: int | None = None) -> dict[str, Any]:
+    """Resumo das sugestões por mods: quantas, quantas foram jogadas, passou, 1.ª tentativa, accuracy e pp obtidos contra os previstos."""
+    import numpy as np
+
+    out: dict[str, Any] = {}
+    by: dict[str, list[dict[str, Any]]] = {}
+    for r in history(store, user_id, limit=100_000):
+        by.setdefault(r["mods"] or "NM", []).append(r)
+    for mods, rows in by.items():
+        played = [r for r in rows if r["played"]]
+        lz = [r for r in played if r["passed"] is not None]
+        ac = [r for r in played if r["best_acc"] is not None]
+        pp = [r for r in played if r["best_pp"] is not None and r["pp_est"]]
+        out[mods] = {"recommended": len(rows), "played": len(played),
+                     "passed": (sum(bool(r["passed"]) for r in lz), len(lz)),
+                     "first_try": (sum(bool(r["first_try"]) for r in lz if r["first_try"] is not None), sum(r["first_try"] is not None for r in lz)),
+                     "p_pass_predicted_mean": round(float(np.mean([r["p_pass"] for r in lz if r["p_pass"] is not None])), 3) if lz else None,
+                     "best_acc_median": round(float(np.median([r["best_acc"] for r in ac])), 4) if ac else None,
+                     "acc_predicted_median": round(float(np.median([r["acc_pass"] for r in ac if r["acc_pass"] is not None])), 4) if ac else None,
+                     "pp_real_vs_est": [round(float(np.mean([r["best_pp"] for r in pp])), 1), round(float(np.mean([r["pp_est"] for r in pp])), 1)] if pp else None}
     return out

@@ -153,23 +153,27 @@ const KIND={novo:"novo",rejogar:"rejogar",tentar_de_novo:"tentar de novo"};
 function recCard(uid){
  const box=el("div","card2"),head=el("div");head.appendChild(el("b","","Recomendar mapas"));
  box.appendChild(head);box.appendChild(el("div","sub","Escolhe a(s) skill(s) que queres melhorar. O resto é automático: mapas com accuracy esperada ≥ 88 % (ideal ~93 %) que te desafiem nessas skills, do estilo de jogadores parecidos; mapas já jogados voltam se a accuracy/pp prevista for bastante superior à atual."));
- const row=el("div","tools"),sel=new Set();
+ const row=el("div","tools"),sel=new Set(),foc=el("select"),selM=new Set([""]),mrow=el("div","tools"),arin=el("input");
+ arin.type="number";arin.step="0.1";arin.min="7";arin.max="11.5";arin.placeholder="AR máx. (auto)";arin.style.width="120px";arin.title="AR efetivo máximo; vazio = o teu máximo já passado + 0,3";
+ mrow.appendChild(el("span","sub","Mods:"));
+ [["","NM"],["HD","HD"],["DT","DT"],["DT,HD","DT+HD"],["HR","HR"],["HD,HR","HD+HR"]].forEach(([v,t])=>{const b=el("button",v===""?"on":"",t);b.onclick=()=>{if(selM.has(v)){if(selM.size>1){selM.delete(v);b.classList.remove("on")}}else{selM.add(v);b.classList.add("on")}};b.title="mods das sugestões; podes escolher vários";mrow.appendChild(b)});[["equilibrado","Foco: equilibrado"],["skill","Foco: só skill"],["pp","Foco: pp"]].forEach(([v,t])=>{const o=el("option","",t);o.value=v;foc.appendChild(o)});foc.title="equilibrado = um pouco de ganho de pp; só skill = como antes; pp = prioriza os mapas que mais sobem os pp totais (inclui o nível ambicioso)";
  AXL.forEach(([k,l])=>{const b=el("button","",l);b.onclick=()=>{if(sel.has(k)){sel.delete(k);b.classList.remove("on")}else{sel.add(k);b.classList.add("on")}};row.appendChild(b)});
- const go=el("button","go","Recomendar"),msg=el("span","sub");row.append(go,msg);box.appendChild(row);
+ const go=el("button","go","Recomendar"),msg=el("span","sub");row.append(foc,arin,go,msg);box.appendChild(mrow);box.appendChild(row);
  const out=el("div");box.appendChild(out);
  go.onclick=async()=>{if(!sel.size){msg.textContent="escolhe pelo menos uma skill";return}
   go.disabled=true;msg.textContent="a calcular…";out.replaceChildren();
-  let r;try{r=await post("/api/recommend",{id:uid,skills:[...sel]})}catch(e){r={error:"sem ligação ao servidor"}}
+  let r;try{r=await post("/api/recommend",{id:uid,skills:[...sel],focus:foc.value,mods:[...selM],ar_cap:arin.value})}catch(e){r={error:"sem ligação ao servidor"}}
   go.disabled=false;if(r.error){msg.textContent=r.error;return}
   msg.textContent=`${r.items.length} sugestões · candidatos: ${r.counts.novo} novos, ${r.counts.rejogar} a repetir, ${r.counts.tentar_de_novo} a tentar de novo`;
   const lv=r.player.levels;out.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
   const cols=[{h:"#",sort:x=>x.rank,render:x=>String(x.rank)},
    {h:"Mapa",sort:x=>x.label.toLowerCase(),num:false,cls:"wrap",render:x=>{const a=el("a","lk",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";const w=el("span");w.appendChild(a);w.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));return w}},
-   {h:"Nível",sort:x=>x.tier,num:false,render:x=>x.tier==="seguro"?"seguro":"arriscado"},{h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
+   {h:"Nível",sort:x=>x.tier,num:false,render:x=>x.tier},{h:"Tipo",sort:x=>x.kind,num:false,render:x=>KIND[x.kind]||x.kind},{h:"★",sort:x=>x.stars,render:x=>x.stars.toFixed(2)},
    {h:"Desafio",sort:x=>x.delta[r.skills[0]],render:x=>r.skills.map(a=>a+" "+(x.delta[a]>=0?"+":"")+x.delta[a].toFixed(1)).join(" · ")},
    {h:"P(passar)",sort:x=>x.p_pass,render:x=>Math.round(x.p_pass*100)+" %"},{h:"Acc se passar",sort:x=>x.acc_pass,render:x=>(x.acc_pass*100).toFixed(1)+" %"},
    {h:"Acc atual",sort:x=>x.acc_cur,render:x=>x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"},
    {h:"pp est.",sort:x=>x.pp_gain_pct,render:x=>x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"},
+   {h:"pp / ganho",sort:x=>x.pp_gain,render:x=>x.pp_est==null?"—":Math.round(x.pp_est)+" pp (+"+x.pp_gain.toFixed(1)+")"},
    {h:"Estilo",sort:x=>x.style_pct,render:x=>x.style_pct.toFixed(0)},
    {h:"Porquê",sort:x=>x.why,num:false,cls:"wrap",render:x=>{const d=el("span","sub",x.why);return d}},
    {h:"Feedback",sort:x=>0,render:x=>{const w=el("span"),done=t=>{w.replaceChildren(el("span","sub",t))};
@@ -261,7 +265,12 @@ def actions(explorer: Explorer, checker: Any | None = None, recommender: Any | N
         if recommender is None:
             return {"error": "recomendador indisponível neste painel"}
         skills = body.get("skills") if isinstance(body.get("skills"), list) else []
-        return recommender.recommend(uid, [str(x) for x in skills])
+        mods = body.get("mods") if isinstance(body.get("mods"), list) else [str(body.get("mods") or "")]
+        try:
+            ar_cap = float(body["ar_cap"]) if body.get("ar_cap") not in (None, "") else None
+        except (TypeError, ValueError):
+            ar_cap = None
+        return recommender.recommend_many(uid, [str(x) for x in skills], focus=str(body.get("focus") or "equilibrado"), mods_list=[str(m) for m in mods], ar_cap=ar_cap)
 
     def rec_feedback(body: dict) -> dict:
         uid, bid = _int(body), _int(body, "beatmap_id")

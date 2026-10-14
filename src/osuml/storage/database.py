@@ -70,6 +70,22 @@ class Store:
         self.engine: Engine = create_engine(database_url, future=True)
         self.raw = RawStore(raw_dir)
         m.metadata.create_all(self.engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """Bases de dados já existentes não ganham colunas novas com `create_all`: acrescenta as que faltam (só colunas simples, anuláveis ou com valor por omissão)."""
+        from sqlalchemy import inspect
+
+        insp = inspect(self.engine)
+        with self.engine.begin() as c:
+            for table in m.metadata.sorted_tables:
+                if not insp.has_table(table.name):
+                    continue
+                have = {col["name"] for col in insp.get_columns(table.name)}
+                for col in table.columns:
+                    if col.name in have or col.primary_key or (not col.nullable and col.default is None and col.server_default is None):
+                        continue
+                    c.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(self.engine.dialect)}")
 
     # ------------------------------------------------------------------ runs
     def start_run(self, command: str, target: str | None) -> str:

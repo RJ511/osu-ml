@@ -30,7 +30,11 @@ a{color:var(--acc)}.tag{border:1px solid var(--line);border-radius:5px;padding:1
 <div class="card">
  <div class="row"><input id="player" list="players" placeholder="Nome do jogador (ex.: PXD Vieira)" autocomplete="off"><datalist id="players"></datalist><span class="sub" id="pinfo"></span></div>
  <div class="row" id="skills"></div>
- <div class="row"><button class="go" id="go">Recomendar</button><span class="sub" id="msg"></span></div>
+ <div class="row" id="modsrow"></div>
+ <div class="row"><input id="arcap" type="number" step="0.1" min="7" max="11.5" placeholder="AR máx. (auto)" style="width:120px" title="AR efetivo máximo; vazio = o teu máximo já passado + 0,3">
+  <select id="focus" title="equilibrado = um pouco de ganho de pp; só skill = como antes; pp = prioriza os mapas que mais sobem os pp totais (inclui o nível ambicioso)">
+  <option value="equilibrado">Foco: equilibrado</option><option value="skill">Foco: só skill</option><option value="pp">Foco: pp</option></select>
+  <button class="go" id="go">Recomendar</button><span class="sub" id="msg"></span></div>
 </div>
 <div id="out"></div>
 <div class="card" id="blkcard" style="display:none"><b>Mapas que não queres receber</b>
@@ -46,6 +50,7 @@ function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==u
 async function post(path,body){const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Panel-Token":TOKEN},body:JSON.stringify(body)});return r.json()}
 const SK=[["aim","Aim"],["speed","Speed"],["stamina","Stamina"],["reading","Reading"]],KIND={novo:"novo",rejogar:"rejogar",tentar_de_novo:"tentar de novo"};
 const sel=new Set();
+const selM=new Set([""]);[["","NM"],["HD","HD"],["DT","DT"],["DT,HD","DT+HD"],["HR","HR"],["HD,HR","HD+HR"]].forEach(([v,t])=>{const b=el("button",v===""?"on":"",t);b.onclick=()=>{if(selM.has(v)){if(selM.size>1){selM.delete(v);b.classList.remove("on")}}else{selM.add(v);b.classList.add("on")}};$("modsrow").appendChild(b)});
 SK.forEach(([k,l])=>{const b=el("button","",l);b.onclick=()=>{if(sel.has(k)){sel.delete(k);b.classList.remove("on")}else{sel.add(k);b.classList.add("on")}};$("skills").appendChild(b)});
 let players=[];
 fetch("/api/state").then(r=>r.json()).then(s=>{players=s.players||[];const dl=$("players");players.forEach(p=>{const o=document.createElement("option");o.value=p.username;dl.appendChild(o)});
@@ -73,19 +78,20 @@ $("go").onclick=async()=>{
  const name=$("player").value.trim();if(!name){$("msg").textContent="escreve o nome de um jogador";return}
  if(!sel.size){$("msg").textContent="escolhe pelo menos uma skill";return}
  $("go").disabled=true;$("msg").textContent="a calcular…";$("out").replaceChildren();
- let r;try{r=await post("/api/recommend",{player:name,skills:[...sel]})}catch(e){r={error:"sem ligação ao servidor"}}
+ let r;try{r=await post("/api/recommend",{player:name,skills:[...sel],focus:$("focus").value,mods:[...selM],ar_cap:$("arcap").value})}catch(e){r={error:"sem ligação ao servidor"}}
  $("go").disabled=false;if(r.error){$("msg").textContent=r.error;$("msg").className="sub err";return}
  $("msg").className="sub";loadBlocks();$("msg").textContent=r.items.length+" sugestões para "+r.player.username+" · candidatos: "+r.counts.novo+" novos, "+r.counts.rejogar+" a repetir, "+r.counts.tentar_de_novo+" a tentar de novo · com P(passar) ≥ 80 %: "+r.counts.sugestoes_seguras;
  const lv=r.player.levels,card=el("div","card");
  card.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
  const wrap=el("div","tblwrap"),tb=el("table"),hd=el("tr");
- ["#","Mapa","Nível","Tipo","★","Desafio","P(passar)","Acc se passar","Acc atual","pp est.","Estilo","Porquê","Feedback"].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
+ ["#","Mapa","Nível","Tipo","★","Desafio","P(passar)","Acc se passar","Acc atual","pp est.","pp / ganho","Estilo","Porquê","Feedback"].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
  r.items.forEach((x,i)=>{const tr=el("tr");tr.appendChild(el("td","num",String(i+1)));
   const tm=el("td"),a=el("a","",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";tm.appendChild(a);tm.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));tr.appendChild(tm);
-  tr.appendChild(el("td","",x.tier==="seguro"?"seguro":"arriscado"));tr.appendChild(el("td","",KIND[x.kind]||x.kind));tr.appendChild(el("td","num",x.stars.toFixed(2)));
+  tr.appendChild(el("td","",x.tier));tr.appendChild(el("td","",KIND[x.kind]||x.kind));tr.appendChild(el("td","num",x.stars.toFixed(2)));
   tr.appendChild(el("td","num",r.skills.map(s=>s+" "+(x.delta[s]>=0?"+":"")+x.delta[s].toFixed(1)).join(" · ")));
   tr.appendChild(el("td","num",Math.round(x.p_pass*100)+" %"));tr.appendChild(el("td","num",(x.acc_pass*100).toFixed(1)+" %"));
   tr.appendChild(el("td","num",x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"));tr.appendChild(el("td","num",x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"));
+  tr.appendChild(el("td","num",x.pp_est==null?"—":Math.round(x.pp_est)+" pp (+"+x.pp_gain.toFixed(1)+")"));
   tr.appendChild(el("td","num",x.style_pct.toFixed(0)));tr.appendChild(el("td","why",x.why));
   const fb=el("td"),y=el("button","","Serve"),n=el("button","","Não serve");
   const send=async v=>{const res=await post("/api/feedback",{player:r.player.username,beatmap_id:x.beatmap_id,verdict:v,skills:r.skills,kind:x.kind,score:x.score});
@@ -114,7 +120,13 @@ def build_app(recommender: Any, port: int):
             names = ", ".join(p["username"] for p in recommender.players()) or "nenhum"
             return {"error": f"jogador não encontrado na base de dados (disponíveis: {names})"}
         skills = body.get("skills") if isinstance(body.get("skills"), list) else []
-        res = recommender.recommend(found[0], [str(s) for s in skills], n=20)
+        mods = body.get("mods") if isinstance(body.get("mods"), list) else [str(body.get("mods") or "")]
+        try:
+            ar_cap = float(body["ar_cap"]) if body.get("ar_cap") not in (None, "") else None
+        except (TypeError, ValueError):
+            ar_cap = None
+        res = recommender.recommend_many(found[0], [str(s) for s in skills], n=20, focus=str(body.get("focus") or "equilibrado"),
+                                         mods_list=[str(m) for m in mods], ar_cap=ar_cap)
         if "error" not in res:
             res["player"] = {**res["player"], "username": found[1]}
         return res

@@ -199,3 +199,19 @@ def test_actions_returning_none_are_ok_not_404_and_unknown_actions_are_404(tmp_p
         assert exc.value.code == 404
     finally:
         server.shutdown()
+
+
+def test_remote_access_only_for_the_authorised_tailscale_user():
+    from osuml.panel.server import host_allowed
+
+    rh, ru, port = "alu-m.tail424d06.ts.net", "dono@example.com", 8765
+    ok = {"Tailscale-User-Login": "Dono@example.com"}
+    assert host_allowed(f"127.0.0.1:{port}", port, {}, "127.0.0.1")  # local continua a funcionar
+    assert host_allowed(f"{rh}:{port}", port, ok, "127.0.0.1", rh, ru)
+    # outra conta da tailnet (dispositivo partilhado), sem cabeçalho, ou sem configuração remota: recusado
+    assert not host_allowed(f"{rh}:{port}", port, {"Tailscale-User-Login": "outro@example.com"}, "127.0.0.1", rh, ru)
+    assert not host_allowed(f"{rh}:{port}", port, {}, "127.0.0.1", rh, ru)
+    assert not host_allowed(f"{rh}:{port}", port, ok, "127.0.0.1")
+    # ligação direta de outra máquina com o cabeçalho forjado: recusada (só o proxy local é de confiança)
+    assert not host_allowed(f"{rh}:{port}", port, ok, "100.102.141.88", rh, ru)
+    assert not host_allowed("evil.example:8765", port, ok, "127.0.0.1", rh, ru)

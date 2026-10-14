@@ -284,3 +284,89 @@ def test_retrain_prepare_builds_the_source_zip_and_the_api_plays_input(tmp_path)
     names = set(zipfile.ZipFile(out["files"]["osuml_src.zip"]).namelist())
     assert "pyproject.toml" in names and "src/osuml/maintenance.py" in names and not any("__pycache__" in n for n in names)
     assert all(Path(p).exists() for p in out["files"].values())
+
+
+# ---------------------------------------------------------------- carregamento mensal dos mapas
+LISTING_NEW = "2026_10_01_osu_files.tar.bz2 2026_09_01_osu_files.tar.bz2"
+
+
+class _FakeSettings:
+    def __init__(self, root):
+        self.data_dir = root
+
+
+def test_maps_load_only_acts_inside_the_window_and_with_a_newer_dump(tmp_path):
+    s = _FakeSettings(tmp_path)
+    calls = []
+    out = mt.maps_load(s, None, today=date(2026, 10, 14), window_days=7, fetch=lambda: calls.append("x") or LISTING_NEW)
+    assert not out["checked"] and calls == []  # fora da janela: nem a listagem se pede
+    out = mt.maps_load(s, None, today=date(2026, 10, 2), fetch=lambda: "2026_09_01_osu_files.tar.bz2")
+    assert out["checked"] and not out["loaded"] and out["reason"] == "sem dump de mapas novo"
+
+
+def test_maps_load_downloads_imports_categorizes_and_keeps_only_latest(tmp_path):
+    s = _FakeSettings(tmp_path)
+    dump_dir = tmp_path / "external" / "osu_files"
+    dump_dir.mkdir(parents=True)
+    (dump_dir / "2026_09_01_osu_files.tar.bz2").write_bytes(b"antigo")
+    seen = {}
+
+    def downloader(snapshot, dest):
+        seen["snapshot"] = snapshot
+        p = dest / f"{snapshot}_osu_files.tar.bz2"
+        p.write_bytes(b"novo")
+        return p
+
+    out = mt.maps_load(s, None, today=date(2026, 10, 2), fetch=lambda: LISTING_NEW, downloader=downloader,
+                       wanted_fn=lambda store: {1: "a", 2: "b"}, importer=lambda store, path: {"matched": 2},
+                       categorizer=lambda settings, store: {"new": 5})
+    assert out["loaded"] and seen["snapshot"] == "2026_10_01" and out["import"] == {"matched": 2} and out["categorize"] == {"new": 5}
+    assert sorted(p.name for p in dump_dir.glob("*.tar.bz2")) == ["2026_10_01_osu_files.tar.bz2"]
+    assert mt.load_state(s)["maps_loaded_snapshot"] == "2026_10_01"
+    # já carregado: não repete
+    again = mt.maps_load(s, None, today=date(2026, 10, 3), fetch=lambda: LISTING_NEW)
+    assert not again["loaded"]
+
+
+def test_maps_load_skips_download_when_nothing_is_missing_and_does_not_mark_on_failure(tmp_path):
+    s = _FakeSettings(tmp_path)
+    out = mt.maps_load(s, None, today=date(2026, 10, 2), fetch=lambda: LISTING_NEW, wanted_fn=lambda store: {},
+                       downloader=lambda *a, **k: pytest.fail("não devia descarregar"), categorizer=lambda settings, store: {})
+    assert out["loaded"] and out["import"] == "nada em falta: sem download"
+
+    s2 = _FakeSettings(tmp_path / "outro")
+
+    def boom(snapshot, dest):
+        raise RuntimeError("rede em baixo")
+
+    with pytest.raises(RuntimeError):
+        mt.maps_load(s2, None, today=date(2026, 10, 2), fetch=lambda: LISTING_NEW, downloader=boom, wanted_fn=lambda store: {1: "a"})
+    assert mt.load_state(s2)["maps_loaded_snapshot"] == "2026_09_01"  # falhou: repete-se no dia seguinte
+
+
+def test_download_dump_checks_size_and_free_space(tmp_path):
+    import io
+
+    class Resp(io.BytesIO):
+        def __init__(self, data, length):
+            super().__init__(data)
+            self.headers = {"Content-Length": str(length)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    ok = mt.download_dump("2026_10_01", tmp_path, opener=lambda url: Resp(b"x" * 100, 100), free_bytes=lambda p: 10_000)
+    assert ok.read_bytes() == b"x" * 100 and not list(tmp_path.glob("*.part"))
+    with pytest.raises(RuntimeError, match="incompleto"):
+        mt.download_dump("2026_11_01", tmp_path, opener=lambda url: Resp(b"x" * 50, 100), free_bytes=lambda p: 10_000)
+    assert not list(tmp_path.glob("*.part"))
+    with pytest.raises(RuntimeError, match="espaço"):
+        mt.download_dump("2026_12_01", tmp_path, opener=lambda url: Resp(b"x" * 100, 100), free_bytes=lambda p: 150)
+
+
+def test_maps_load_default_window_covers_a_late_dump(tmp_path):
+    out = mt.maps_load(_FakeSettings(tmp_path), None, today=date(2026, 10, 28), fetch=lambda: "2026_09_01_osu_files.tar.bz2")
+    assert out["checked"]  # dia 28: ainda consulta (o dump pode sair tarde)

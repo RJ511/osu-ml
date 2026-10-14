@@ -73,6 +73,10 @@ def default_templates() -> dict[str, Template]:
         return lambda m, prog: ["dump-table", "--tar", _perf_tar(kind), "--table", "osu_user_beatmap_playcount", "--progress", prog]
 
     return {
+        "tags-phase1": Template("Tags dos mapas — fase 1 (teus mapas + rival)",
+                                "1 pedido por set ao mirror hinai (ranked/loved), 1/s, respeita o guard; 0 pedidos à osu!API.",
+                                lambda m, prog: ["tags", "collect", "--user-ids", "13745526", "32736143", "--max-sets", "600",
+                                                 "--progress", prog], "~8 min (+ espera do guard)", []),
         "dump-playcount-random": Template("Importar tentativas (playcount) — random_10000",
                                           "Tabela osu_user_beatmap_playcount do dump → Parquet (0 pedidos à API).",
                                           table("random_10000"), "~8-10 min", [_perf_tar("random_10000")]),

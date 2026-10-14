@@ -7,6 +7,7 @@ token aleatório embutido na página desta execução (contra outros sites a cha
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -111,14 +112,36 @@ refresh();setInterval(refresh,1000);setInterval(tick,100);
 _NOT_FOUND = object()  # `None` é uma resposta válida de uma ação (ex.: cancelar); "não existe" é outra coisa
 
 
+LOCAL_PEERS = {"127.0.0.1", "::1"}
+
+
+def host_allowed(host: str, port: int, headers: Any, peer: str, remote_host: str = "", remote_user: str = "") -> bool:
+    """Local: `Host` local. Remoto (Tailscale Serve): só se o pedido chegar do próprio PC (o `serve` faz proxy
+    para 127.0.0.1), com o `Host` do nome da tailnet **e** a identidade que o Tailscale acrescenta
+    (`Tailscale-User-Login`) igual ao utilizador autorizado — outras contas da tailnet (dispositivos partilhados)
+    não passam. O `Tailscale-User-Login` só é de confiança porque o servidor continua ligado a 127.0.0.1."""
+    if host in {f"127.0.0.1:{port}", f"localhost:{port}"}:
+        return True
+    if not remote_host or not remote_user or peer not in LOCAL_PEERS:
+        return False
+    remote_hosts = {f"{remote_host}:{port}".lower(), remote_host.lower()}
+    login = (headers.get("Tailscale-User-Login") or "").strip().lower()
+    return host.lower() in remote_hosts and login == remote_user.strip().lower()
+
+
 def _build_server(port: int, token: str, get_fn: Callable[[str], tuple[int, bytes, str] | None],
                   post_fn: Callable[[str, dict], Any]) -> ThreadingHTTPServer:
     """Servidor local: `Host` tem de ser local e as ações (POST) exigem o token da página."""
-    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    remote_host = os.environ.get("OSUML_REMOTE_HOST", "")
+    remote_user = os.environ.get("OSUML_REMOTE_USER", "")
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # sem ruído no terminal
             pass
+
+        def _allowed(self) -> bool:
+            return host_allowed(self.headers.get("Host", ""), port, self.headers, self.client_address[0],
+                                remote_host, remote_user)
 
         def _send(self, code: int, body: bytes, ctype: str) -> None:
             self.send_response(code)
@@ -132,7 +155,7 @@ def _build_server(port: int, token: str, get_fn: Callable[[str], tuple[int, byte
             self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode(), "application/json; charset=utf-8")
 
         def do_GET(self) -> None:
-            if self.headers.get("Host", "") not in allowed_hosts:
+            if not self._allowed():
                 return self._json({"error": "host inválido"}, 403)
             res = get_fn(self.path)
             if res is None:
@@ -140,7 +163,7 @@ def _build_server(port: int, token: str, get_fn: Callable[[str], tuple[int, byte
             self._send(*res)
 
         def do_POST(self) -> None:
-            if self.headers.get("Host", "") not in allowed_hosts or self.headers.get("X-Panel-Token") != token:
+            if not self._allowed() or self.headers.get("X-Panel-Token") != token:
                 return self._json({"error": "não autorizado"}, 403)
             length = int(self.headers.get("Content-Length") or 0)
             try:
