@@ -182,7 +182,7 @@ class WeeklyPlanner:
         return band
 
     # ------------------------------------------------------------------ estado
-    def state(self, uid: int, plays: list[dict[str, Any]], goal: dict[str, Any], today: date) -> dict[str, Any] | None:
+    def state(self, uid: int, plays: list[dict[str, Any]], goal: dict[str, Any], today: date, rejected: set[int] | None = None) -> dict[str, Any] | None:
         stats = nomod_stats(plays, today)
         band = self.test_band(uid, goal, stats)
         out: dict[str, Any] = {"week": week_id(today), "week_start": week_monday(today).isoformat(), "band": band, "stats": stats, "status": "unavailable",
@@ -205,9 +205,25 @@ class WeeklyPlanner:
                 return out
             if wid not in self._building:
                 self._building.add(wid)
-                threading.Thread(target=self._build_thread, args=(uid, plays, goal, today, band, stats), name="weekly-plan", daemon=True).start()
+                threading.Thread(target=self._build_thread, args=(uid, plays, goal, today, band, stats, rejected), name="weekly-plan", daemon=True).start()
         out["status"] = "building"
         return out
+
+    def reject(self, uid: int, beatmap_id: int, plays: list[dict[str, Any]], rejected: set[int], today: date) -> dict[str, Any]:
+        """"Não serve": troca o mapa no plano guardado desta semana (se ainda por jogar) e grava o plano."""
+        if self.rec is None:
+            return {"replaced": False, "reason": "recomendador indisponível"}
+        f = self._plan_file(uid, week_id(today))
+        with self._lock:
+            if not f.exists():
+                return {"replaced": False, "reason": "ainda sem plano desta semana"}
+            plan = json.loads(f.read_text(encoding="utf-8"))
+            res = replace_in_plan(self.rec, uid, plan, beatmap_id, plays, rejected)
+            if res["replaced"]:
+                tmp = f.with_suffix(".tmp")
+                tmp.write_text(json.dumps(plan, ensure_ascii=False, default=str), encoding="utf-8")
+                tmp.replace(f)
+        return res
 
     def _history(self, uid: int, plays: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
         """Testes das semanas anteriores (planos guardados), avaliados contra as jogadas dessa semana."""
@@ -222,10 +238,10 @@ class WeeklyPlanner:
             hist.append({"week": plan["week"], "week_start": plan["week_start"], **plan["test"]["summary"], "band": plan["test"]["band"]})
         return hist[-HISTORY_WEEKS:]
 
-    def _build_thread(self, uid, plays, goal, today, band, stats) -> None:
+    def _build_thread(self, uid, plays, goal, today, band, stats, rejected=None) -> None:
         wid = week_id(today)
         try:
-            plan = build_plan(self.rec, uid, plays, today, band, stats)
+            plan = build_plan(self.rec, uid, plays, today, band, stats, rejected)
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = self._plan_file(uid, wid).with_suffix(".tmp")
             tmp.write_text(json.dumps(plan, ensure_ascii=False, default=str), encoding="utf-8")
@@ -251,37 +267,59 @@ def _pick_diverse(cands: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     return out
 
 
-def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, band: list[float], stats: dict[str, Any]) -> dict[str, Any]:
-    """Monta o teste e as sessões desta semana com o recomendador (só leitura local)."""
-    ws = week_monday(today)
-    limits = rec._limits(uid, "") or {}
-    ar_cap = limits.get("ar_cap") or 10.1
-    s90, s_max = stats["s90"], stats["s_max"]
-    seed = int(ws.strftime("%Y%m%d")) + int(uid)
-    test = rec.band_candidates(uid, band[0], band[1], mods="", min_p=0.35, max_ar=ar_cap, n=TEST_MAPS, order="random", seed=seed)
-    taken = {m["beatmap_id"] for m in test}
+def _clean(c: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {"beatmap_id": c["beatmap_id"], "label": c["label"], "url": c["url"], "stars": c["stars"], "ar": c.get("ar"), "mods": c.get("mods") or "",
+            "p_pass": c.get("p_pass"), "acc_pass": c.get("acc_pass"), **extra}
 
-    def clean(c: dict[str, Any], **extra: Any) -> dict[str, Any]:
-        return {"beatmap_id": c["beatmap_id"], "label": c["label"], "url": c["url"], "stars": c["stars"], "ar": c.get("ar"), "mods": c.get("mods") or "",
-                "p_pass": c.get("p_pass"), "acc_pass": c.get("acc_pass"), **extra}
 
-    # fixa as tuas próprias jogadas sem mods: melhor accuracy por mapa
+def _best_nomod(plays: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Melhor passe sem mods (por accuracy) de cada mapa."""
     best: dict[int, dict[str, Any]] = {}
     for p in plays:
         if _is_nomod(p) and p["passed"] and p["accuracy"] and _stars(p):
             if p["beatmap_id"] not in best or p["accuracy"] > best[p["beatmap_id"]]["accuracy"]:
                 best[p["beatmap_id"]] = p
-    url = lambda bid: f"https://osu.ppy.sh/beatmaps/{bid}"  # noqa: E731
-    mine = lambda p, **extra: {"beatmap_id": p["beatmap_id"], "label": p["map"], "url": url(p["beatmap_id"]), "stars": round(_stars(p), 2), "mods": "", **extra}  # noqa: E731
-    consolidate = sorted((p for p in best.values() if 0.92 <= p["accuracy"] < 0.97 and s90 - 0.6 <= _stars(p) <= s90 + 0.3), key=lambda p: p["accuracy"])[:3]
-    warm = sorted((p for p in best.values() if p["accuracy"] >= 0.97 and _stars(p) <= s90 - 0.8), key=lambda p: -p["accuracy"])[:2]
-    stretch = rec.band_candidates(uid, s_max + 0.1, s_max + 0.8, mods="", min_p=0.2, max_ar=ar_cap, n=2, order="p")
-    variety = _pick_diverse([c for c in rec.band_candidates(uid, s90 - 0.3, s90 + 0.3, mods="", min_p=0.6, max_ar=ar_cap, n=60, order="p") if c["beatmap_id"] not in taken], 5)
-    dt_lim = rec._limits(uid, "DT") or {}
-    dt = []
-    if dt_lim.get("stars_ceiling"):
-        top = dt_lim["stars_ceiling"]
-        dt = [c for c in rec.band_candidates(uid, max(3.5, top - 1.0), top, mods="DT", min_p=0.5, max_ar=ar_cap, n=40, order="p") if c["ar"] >= 9.4][:3]
+    return best
+
+
+def _mine(p: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {"beatmap_id": p["beatmap_id"], "label": p["map"], "url": f"https://osu.ppy.sh/beatmaps/{p['beatmap_id']}", "stars": round(_stars(p), 2), "mods": "", **extra}
+
+
+def _consolidate(best: dict[int, dict[str, Any]], s90: float, skip: set[int]) -> list[dict[str, Any]]:
+    return sorted((p for p in best.values() if 0.92 <= p["accuracy"] < 0.97 and s90 - 0.6 <= _stars(p) <= s90 + 0.3 and p["beatmap_id"] not in skip),
+                  key=lambda p: p["accuracy"])
+
+
+def _dt_candidates(rec: Any, uid: int, ar_cap: float, skip: set[int]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    lim = rec._limits(uid, "DT") or {}
+    if not lim.get("stars_ceiling"):
+        return [], lim
+    top = lim["stars_ceiling"]
+    cands = rec.band_candidates(uid, max(3.5, top - 1.0), top, mods="DT", min_p=0.5, max_ar=ar_cap, n=40 + len(skip), order="p")
+    return [c for c in cands if c["ar"] >= 9.4 and c["beatmap_id"] not in skip], lim
+
+
+def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, band: list[float], stats: dict[str, Any],
+               rejected: set[int] | None = None) -> dict[str, Any]:
+    """Monta o teste e as sessões desta semana com o recomendador (só leitura local). `rejected` = mapas a que disseste "Não serve" (nunca entram)."""
+    rej = set(rejected or ())
+    ws = week_monday(today)
+    limits = rec._limits(uid, "") or {}
+    ar_cap = limits.get("ar_cap") or 10.1
+    s90, s_max = stats["s90"], stats["s_max"]
+    seed = int(ws.strftime("%Y%m%d")) + int(uid)
+    ask = lambda lo, hi, n, **kw: [c for c in rec.band_candidates(uid, lo, hi, max_ar=ar_cap, n=n + len(rej), **kw) if c["beatmap_id"] not in rej]  # noqa: E731
+    test = ask(band[0], band[1], TEST_MAPS, mods="", min_p=0.35, order="random", seed=seed)[:TEST_MAPS]
+    taken = {m["beatmap_id"] for m in test}
+    clean, mine = _clean, _mine
+    best = _best_nomod(plays)  # as tuas próprias jogadas sem mods: melhor accuracy por mapa
+    consolidate = _consolidate(best, s90, rej)[:3]
+    warm = sorted((p for p in best.values() if p["accuracy"] >= 0.97 and _stars(p) <= s90 - 0.8 and p["beatmap_id"] not in rej), key=lambda p: -p["accuracy"])[:2]
+    stretch = ask(s_max + 0.1, s_max + 0.8, 2, mods="", min_p=0.2, order="p")[:2]
+    variety = _pick_diverse([c for c in ask(s90 - 0.3, s90 + 0.3, 60, mods="", min_p=0.6, order="p") if c["beatmap_id"] not in taken], 5)
+    dt_all, dt_lim = _dt_candidates(rec, uid, ar_cap, rej)
+    dt = dt_all[:3]
 
     sessions = [
         {"key": "A", **BLOCKS["A"], "maps": [mine(p, best_acc=p["accuracy"], target=round(min(p["accuracy"] + 0.015, 0.99), 3)) for p in consolidate]},
@@ -297,3 +335,73 @@ def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, ban
             "test": {"band": band, "maps": [clean(c) for c in test],
                      "how": "Joga cada mapa pela 1.ª vez, sem mods. Só a 1.ª jogada conta (accuracy e se passaste); depois podes repetir à vontade."},
             "sessions": sessions}
+
+
+def _plan_ids(plan: dict[str, Any]) -> set[int]:
+    ids = {m["beatmap_id"] for m in plan["test"]["maps"]}
+    for sess in plan["sessions"]:
+        ids |= {m["beatmap_id"] for m in sess["maps"] + sess.get("alternative", [])}
+        for b in sess["blocks"]:
+            ids |= {m["beatmap_id"] for m in b.get("maps", [])}
+    return ids
+
+
+def replace_in_plan(rec: Any, uid: int, plan: dict[str, Any], beatmap_id: int, plays: list[dict[str, Any]], rejected: set[int]) -> dict[str, Any]:
+    """Troca um mapa a que disseste "Não serve" por outro com o mesmo papel no plano (mesma faixa/mods/sessão), sem repetir nenhum mapa do plano
+    nem dos rejeitados. Só troca mapas ainda por jogar. Devolve {"replaced": bool, "new": mapa|None, "reason"?} e altera `plan`."""
+    start = date.fromisoformat(plan["week_start"])
+    ws = week_monday(start)
+    rej = set(rejected) | {beatmap_id}
+    used = _plan_ids(plan) | rej
+    limits = plan.get("limits") or {}
+    ar_cap = limits.get("ar_cap") or 10.1
+    stats = plan["stats"]
+    s90, s_max = stats["s90"], stats["s_max"]
+    n_prev = len(plan.get("rejected", []))
+    seed = int(ws.strftime("%Y%m%d")) + int(uid) + 101 * (n_prev + 1)
+
+    def first(cands: list[dict[str, Any]]) -> dict[str, Any] | None:
+        return next((c for c in cands if c["beatmap_id"] not in used), None)
+
+    def ask(lo: float, hi: float, **kw: Any) -> list[dict[str, Any]]:
+        return rec.band_candidates(uid, lo, hi, max_ar=ar_cap, n=60 + len(used), **kw)
+
+    target_list, role, old = None, None, None
+    for m in plan["test"]["maps"]:
+        if m["beatmap_id"] == beatmap_id:
+            target_list, role, old = plan["test"]["maps"], "test", m
+    for sess in plan["sessions"]:
+        for key in ("maps", "alternative"):
+            for m in sess.get(key, []):
+                if m["beatmap_id"] == beatmap_id and target_list is None:
+                    target_list, role, old = sess[key], sess["key"], m
+    if target_list is None:
+        return {"replaced": False, "reason": "o mapa não está no plano desta semana"}
+    st = _map_status(plays, beatmap_id, old.get("mods") or "", start, start + timedelta(days=7))
+    if st["played"]:
+        return {"replaced": False, "reason": "já jogaste este mapa esta semana"}
+    new: dict[str, Any] | None = None
+    if role == "test":
+        new = first(ask(plan["test"]["band"][0], plan["test"]["band"][1], mods="", min_p=0.35, order="random", seed=seed))
+        new = _clean(new) if new else None
+    elif role == "A":
+        p = next(iter(_consolidate(_best_nomod(plays), s90, used)), None)
+        new = _mine(p, best_acc=p["accuracy"], target=round(min(p["accuracy"] + 0.015, 0.99), 3)) if p else None
+    elif role == "B":
+        new = first(ask(s_max + 0.1, s_max + 0.8, mods="", min_p=0.2, order="p"))
+        new = _clean(new) if new else None
+    elif role == "C":
+        cands = [c for c in ask(s90 - 0.3, s90 + 0.3, mods="", min_p=0.6, order="p") if c["beatmap_id"] not in used]
+        same = [c for c in cands if c["dominant"] == old.get("dominant")]
+        new = (same or cands or [None])[0]
+        new = _clean(new, dominant=new["dominant"]) if new else None
+    elif role == "D":
+        cands, _lim = _dt_candidates(rec, uid, ar_cap, used)
+        new = _clean(cands[0]) if cands else None
+    i = target_list.index(old)
+    if new is None:
+        target_list.pop(i)  # sem substituto dentro dos teus limites: remove-se (melhor que insistir num mapa que não serve)
+    else:
+        target_list[i] = new
+    plan.setdefault("rejected", []).append({"beatmap_id": beatmap_id, "role": role, "replaced_by": new["beatmap_id"] if new else None})
+    return {"replaced": True, "new": new, "role": role}

@@ -191,7 +191,8 @@ function planRow(m,test,kind){
  else c.appendChild(chip("por jogar"));
  r.appendChild(c);
  if(kind&&m.beatmap_id){const f=$("div","fb"),mk=(v,t,cls)=>{const b=$("button","btn "+cls+(m.verdict===v?" on":""),t);
-   b.onclick=async()=>{b.disabled=true;const res=await post("/api/feedback",{beatmap_id:m.beatmap_id,verdict:v,kind:kind});if(!res.error){m.verdict=v;[...f.children].forEach(x=>x.classList.remove("on"));b.classList.add("on")}b.disabled=false};return b};
+   b.onclick=async()=>{b.disabled=true;const res=await post("/api/feedback",{beatmap_id:m.beatmap_id,verdict:v,kind:kind});if(!res.error){m.verdict=v;[...f.children].forEach(x=>x.classList.remove("on"));b.classList.add("on");
+    if(v==="nao_serve"&&res.swap){b.textContent=res.swap.replaced?(res.swap.new?"trocado ✓":"removido ✓"):(res.swap.reason||"registado");if(res.swap.replaced)setTimeout(load,700)}}b.disabled=false};return b};
   f.append(mk("serve","👍 Serve","ok"),mk("nao_serve","👎 Não serve","no"));r.appendChild(f)}
  return r}
 function tabSemana(app,s){

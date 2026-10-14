@@ -105,3 +105,60 @@ def test_planner_without_recommender_or_data_degrades_gracefully(tmp_path):
     assert s["status"] == "unavailable" and s["band"] is None and "faixa" in s["message"]
     s2 = wk.WeeklyPlanner(None, tmp_path).state(7, [play(i, 3, 0.94, stars=6.0) for i in range(8)], {}, TODAY)
     assert s2["status"] == "unavailable" and s2["message"].startswith("recomendador indisponível")
+
+
+def _plan_for_reject():
+    plays = [play(i, 3, 0.94 + (i % 3) * 0.01, stars=5.8 + i * 0.05, label=f"meu {i}") for i in range(8)] + [play(50, 5, 0.985, stars=4.8, label="aquecimento")]
+    stats = wk.nomod_stats(plays, TODAY)
+    rec = FakeRec()
+    return rec, plays, stats, wk.build_plan(rec, 7, plays, TODAY, [5.8, 6.5], stats)
+
+
+def test_reject_swaps_a_map_for_one_with_the_same_role_without_repeating_anything():
+    rec, plays, stats, plan = _plan_for_reject()
+    before = wk._plan_ids(plan)
+    old = plan["test"]["maps"][1]["beatmap_id"]
+    res = wk.replace_in_plan(rec, 7, plan, old, plays, {old})
+    assert res["replaced"] and res["role"] == "test" and res["new"]["beatmap_id"] not in before | {old}
+    assert plan["test"]["maps"][1]["beatmap_id"] == res["new"]["beatmap_id"] and old not in wk._plan_ids(plan)
+    assert plan["rejected"][0] == {"beatmap_id": old, "role": "test", "replaced_by": res["new"]["beatmap_id"]}
+    # sessão C: o substituto é um mapa novo do mesmo papel (prefere o mesmo eixo dominante, se houver)
+    c_old = plan["sessions"][2]["maps"][0]
+    rc = wk.replace_in_plan(rec, 7, plan, c_old["beatmap_id"], plays, {old, c_old["beatmap_id"]})
+    assert rc["replaced"] and rc["role"] == "C" and rc["new"]["beatmap_id"] not in before | {old, c_old["beatmap_id"]}
+    # sessão D mantém DT; um mapa que não está no plano não se troca
+    d_old = plan["sessions"][3]["maps"][0]
+    rd = wk.replace_in_plan(rec, 7, plan, d_old["beatmap_id"], plays, {d_old["beatmap_id"]})
+    assert rd["replaced"] and (rd["new"] is None or rd["new"]["mods"] == "DT")
+    assert wk.replace_in_plan(rec, 7, plan, 999999, plays, set())["replaced"] is False
+
+
+def test_reject_does_not_swap_a_map_already_played_and_removes_when_there_is_no_substitute():
+    rec, plays, stats, plan = _plan_for_reject()
+    a = plan["sessions"][0]["maps"]
+    played = plays + [play(a[0]["beatmap_id"], 0, 0.9)]
+    res = wk.replace_in_plan(rec, 7, plan, a[0]["beatmap_id"], played, {a[0]["beatmap_id"]})
+    assert res == {"replaced": False, "reason": "já jogaste este mapa esta semana"}
+    n = len(a)
+    for m in list(plan["sessions"][0]["maps"]):  # esgota os substitutos: no fim remove em vez de insistir
+        wk.replace_in_plan(rec, 7, plan, m["beatmap_id"], plays, {m["beatmap_id"]})
+    assert len(plan["sessions"][0]["maps"]) <= n
+
+
+def test_rejected_maps_never_enter_a_new_plan_and_planner_persists_the_swap(tmp_path):
+    rec, plays, stats, plan = _plan_for_reject()
+    banned = {m["beatmap_id"] for m in plan["test"]["maps"][:2]} | {m["beatmap_id"] for m in plan["sessions"][2]["maps"][:2]}
+    plan2 = wk.build_plan(rec, 7, plays, TODAY, [5.8, 6.5], stats, rejected=banned)
+    assert not (wk._plan_ids(plan2) & banned)
+    planner = wk.WeeklyPlanner(FakeRec(), tmp_path)
+    for _ in range(200):
+        s = planner.state(7, plays, {}, TODAY)
+        if s["status"] == "ready":
+            break
+        time.sleep(0.05)
+    bid = s["test"]["maps"][0]["beatmap_id"]
+    out = planner.reject(7, bid, plays, {bid}, TODAY)
+    assert out["replaced"]
+    again = planner.state(7, plays, {}, TODAY, rejected={bid})
+    assert bid not in {m["beatmap_id"] for m in again["test"]["maps"]} and again["test"]["maps"][0]["beatmap_id"] == out["new"]["beatmap_id"]
+    assert wk.WeeklyPlanner(None, tmp_path).reject(7, bid, plays, set(), TODAY)["replaced"] is False

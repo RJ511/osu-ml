@@ -295,6 +295,13 @@ class Evolution:
                                         note=str(body.get("note") or "")[:200])
         if self.live is not None and "error" not in res:
             self.live.run_once(force=True)  # liga já o resultado ao registo
+        if body.get("verdict") == "nao_serve" and self.weekly is not None and "error" not in res:
+            try:  # "Não serve" troca o mapa por outro com o mesmo papel no plano desta semana
+                data = self.explorer.player(int(uid))
+                rej = {b for b, v in self._verdicts(int(uid)).items() if v == "nao_serve"}
+                res["swap"] = self.weekly.reject(int(uid), int(body["beatmap_id"]), data["plays"], rej, self._today())
+            except Exception as exc:  # noqa: BLE001
+                res["swap"] = {"replaced": False, "reason": f"{type(exc).__name__}: {exc}"[:120]}
         return res
 
     def check_now(self, _body: dict) -> dict[str, Any]:
@@ -313,7 +320,8 @@ class Evolution:
         if self.weekly is None:
             return None
         try:
-            return self._with_verdicts(self.weekly.state(uid, plays, goal, today), uid)
+            rej = {b for b, v in self._verdicts(uid).items() if v == "nao_serve"}
+            return self._with_verdicts(self.weekly.state(uid, plays, goal, today, rejected=rej), uid)
         except Exception as exc:  # a semana de treino é um extra: nunca pode deitar a página abaixo
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"[:200]}
 
