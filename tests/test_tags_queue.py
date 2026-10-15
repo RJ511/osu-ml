@@ -261,3 +261,26 @@ def test_high_pain_stops_even_without_pressure_flag(tmp_path):
     col, sleeps = _col(s, mirror)
     out = col.run_queue(max_sets=2, max_wait_guard_s=100)
     assert out["aborted"] and not any("/s/" in p for p in mirror.calls) and col.last_light == "red"
+
+
+def test_plan_wide_interleaves_skill_lists_and_bands_and_phase_d_runs_last(tmp_path):
+    from osuml.tags import queue as tq
+
+    class Rec:
+        def recommend(self, uid, skills, n=20):
+            base = {"aim": [1, 2, 3], "speed": [2, 4, 5], "stamina": [6], "reading": []}[skills[0]]
+            return {"items": [{"beatmapset_id": b} for b in base]}
+
+        def _limits(self, uid, mods):
+            return {"stars_ceiling": 7.0 if not mods else 6.4, "ar_cap": 10.1}
+
+        def band_candidates(self, uid, lo, hi, **kw):
+            return [{"beatmapset_id": 9}, {"beatmapset_id": 1}, {"beatmapset_id": None}] if not kw["mods"] else [{"beatmapset_id": 8}]
+
+    wide = tq.plan_wide(Rec(), 1)
+    assert wide[:4] == [1, 2, 6, 9] and set(wide) == {1, 2, 3, 4, 5, 6, 8, 9} and len(wide) == len(set(wide))  # 1.º de cada lista primeiro, sem repetidos
+    st = _store(tmp_path)
+    assert tq.PHASE_PRIORITY["D"] > tq.PHASE_PRIORITY["A"]
+    tq.enqueue(st, [100], "D")
+    tq.enqueue(st, [200], "B")
+    assert tq.next_batch(st, 5) == [200, 100]  # D vem depois de B

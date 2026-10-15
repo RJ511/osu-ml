@@ -3,7 +3,8 @@
 Fases (prioridade 1 = primeiro), por ordem de utilidade imediata:
 - **B** candidatos que o recomendador propõe ao jogador (para sugerir melhor por estilo);
 - **C** mapas jogados pelos jogadores acompanhados mais parecidos com o jogador (perfil de estilo comparável);
-- **A** amostra aleatória do catálogo (taxas-base: o que é "normal" em cada estilo).
+- **A** amostra aleatória do catálogo (taxas-base: o que é "normal" em cada estilo);
+- **D** (2026-10-15) mais candidatos plausíveis, por ordem de relevância (as melhores sugestões por skill e as faixas do plano semanal), para o filtro de estilo ter mapas com tags.
 Só entram sets ranked/loved/approved (os que o mirror responde localmente). Nada aqui faz pedidos de rede.
 """
 
@@ -21,7 +22,7 @@ from ..storage import models as m
 from ..storage.database import Store, utcnow
 from .collect import GOOD_STATUSES
 
-PHASE_PRIORITY = {"B": 1, "C": 2, "A": 3}
+PHASE_PRIORITY = {"B": 1, "C": 2, "A": 3, "D": 4}
 AXES = ("aim", "speed", "stamina", "reading")
 
 
@@ -69,6 +70,30 @@ def plan_candidates(recommender: Any, user_id: int, n_per_skill: int = 250) -> l
             sid = it.get("beatmapset_id")
             if sid:
                 seen.setdefault(int(sid), None)
+    return list(seen)
+
+
+def plan_wide(recommender: Any, user_id: int, n_per_skill: int = 1200, band_n: int = 1500, dt_n: int = 600) -> list[int]:
+    """Fase D: sets dos candidatos mais relevantes — as `n_per_skill` melhores sugestões por skill e as `band_n`/`dt_n` mais prováveis nas faixas do plano
+    semanal (sem mods e DT) —, intercalados por ordem de relevância (o 1.º de cada lista primeiro) para que um teto diário curto cubra um pouco de tudo."""
+    lists: list[list[int]] = []
+    for skill in AXES:
+        res = recommender.recommend(user_id, [skill], n=n_per_skill)
+        lists.append([int(it["beatmapset_id"]) for it in res.get("items", []) or [] if it.get("beatmapset_id")])
+    lim = recommender._limits(user_id, "") or {}
+    top = float(lim.get("stars_ceiling") or 7.0)
+    nm = recommender.band_candidates(user_id, max(3.5, top - 2.2), top, mods="", min_p=0.5, max_ar=lim.get("ar_cap"), n=band_n, order="p")
+    lists.append([int(c["beatmapset_id"]) for c in nm if c.get("beatmapset_id")])
+    dlim = recommender._limits(user_id, "DT") or {}
+    if dlim.get("stars_ceiling"):
+        dt = recommender.band_candidates(user_id, max(3.5, float(dlim["stars_ceiling"]) - 1.5), float(dlim["stars_ceiling"]), mods="DT", min_p=0.45,
+                                         max_ar=lim.get("ar_cap"), n=dt_n, order="p")
+        lists.append([int(c["beatmapset_id"]) for c in dt if c.get("beatmapset_id")])
+    seen: dict[int, None] = {}
+    for i in range(max((len(x) for x in lists), default=0)):
+        for lst in lists:
+            if i < len(lst):
+                seen.setdefault(lst[i], None)
     return list(seen)
 
 

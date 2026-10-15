@@ -131,3 +131,20 @@ def test_dynamic_rival_keeps_switches_when_reached_or_inactive_and_avoids_flappi
     ex.profs.append(_prof(4, 4600, 55))
     out = ev2.dynamic_rival({"user_id": 1, "pp": 4000}, lv, day)
     assert out["user_id"] == 4 and ev2._rival_state()["history"][-1]["reason"] == "parou de jogar"
+
+
+def test_strain_position_and_fail_summary_separate_resets_from_deaths():
+    from osuml.evolution import fails as FL
+
+    st = {"skills": [{"name": "aim", "values": [0.0, 1.0, 4.0, 2.0, 1.0, 0.5]}, {"name": "speed", "values": [0.0, 3.0, 1.0, 1.0, 1.0, 0.5]}]}
+    peak = FL.strain_position(st, 0.4)  # troço do pico (aim 4) e vizinhos
+    assert peak["of_peak"] == 1.0 and peak["pct"] > 0.8
+    assert FL.strain_position(st, 0.0)["of_peak"] < 0.8 and FL.strain_position({"unavailable": True}, 0.5) is None and FL.strain_position(None, 0.5) is None
+    rows = [{"beatmap_id": 1, "kind": "reinicio", "progress": 0.05, "t_frac": 0.05, "accuracy": 0.85, "miss": 1, "pct_intensity": 0.1, "strain": None},
+            {"beatmap_id": 1, "kind": "morte", "progress": 0.5, "t_frac": 0.5, "accuracy": 0.9, "miss": 8, "pct_intensity": 0.9, "strain": {"pct": 0.9, "of_peak": 0.95}},
+            {"beatmap_id": 1, "kind": "morte", "progress": 0.6, "t_frac": 0.6, "accuracy": 0.9, "miss": 6, "pct_intensity": 0.8, "strain": None},
+            {"beatmap_id": 2, "kind": "reinicio", "progress": 0.1, "t_frac": 0.1, "accuracy": 0.8, "miss": 2, "pct_intensity": 0.2, "strain": None}]
+    s = FL.summarize(rows)
+    assert s["kinds"]["morte"]["n"] == 2 and s["kinds"]["reinicio"]["n"] == 2 and s["kinds"]["morte"]["miss_median"] == 7.0
+    assert s["kinds"]["morte"]["strain_pct_median"] == 0.9 and s["kinds"]["morte"]["n_with_strain"] == 1 and s["kinds"]["reinicio"]["strain_pct_median"] is None
+    assert s["maps"][0]["beatmap_id"] == 1 and s["maps"][0]["deaths"] == 2 and s["maps"][0]["resets"] == 1 and s["maps"][0]["death_at"] == 0.55

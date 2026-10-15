@@ -228,6 +228,7 @@ class Evolution:
             return {"error": f"Jogador {uid} não existe na base de dados."}
         today = self._today()
         plays, me = data["plays"], data["player"]
+        self._plays_labels = {int(p["beatmap_id"]): p["map"] for p in plays if p.get("beatmap_id") and p.get("map")}
         series = self.levels_by_week(plays, today)
         trends = {a: self.trend(series[a]) for a in series}
         levels, levels_age = self.current_levels(series)
@@ -250,6 +251,7 @@ class Evolution:
             "week": self._week(int(uid), plays, goal, today),
             "projection": self._projection(pp_now, target_pp, series, cons),
             "styles": self._styles_safe(int(uid)),
+            "fails": self._fails_safe(int(uid), {int(p["beatmap_id"]): p["map"] for p in plays if p.get("beatmap_id") and p.get("map")}),
             "data_quality": {"stale": stale, "last_check": (data.get("check") or {}).get("last_check_at"),
                              "plays_in_window": n_recent, "window_weeks": WINDOW_WEEKS},
         }
@@ -266,6 +268,37 @@ class Evolution:
         return out
 
     # ------------------------------------------------------------------ ações (feedback, verificar)
+    def fails_data(self, uid: int, labels: dict[int, str]) -> dict[str, Any]:
+        """Falhas (reinício vs morte, onde) do jogador, com cache de 10 min; os mapas das falhas entram na fila de strains do mirror. Nunca deita a página abaixo."""
+        import time
+
+        labels = labels or getattr(self, "_plays_labels", {})
+        now = time.time()
+        cached = getattr(self, "_fails_cache", None)
+        if cached and now - cached[0] < 600 and cached[1].get("uid") == uid:
+            return cached[1]
+        try:
+            from ..recommend.modsview import stable_key
+            from . import fails as FL
+
+            loader = None
+            if self.strains is not None:
+                from ..mirror.client import load_strains
+
+                loader = lambda bid, mods: load_strains(self.strains.raw_dir, bid, stable_key(mods) or "")  # noqa: E731
+            rows = FL.player_fails(self.explorer.store, uid, loader)
+            summ = FL.summarize(rows)
+            for mp in summ["maps"]:
+                mp["label"] = labels.get(mp["beatmap_id"], f"mapa #{mp['beatmap_id']}")
+            if self.strains is not None:  # mapas onde mais falhas: pede-se a curva em fundo (a próxima atualização já traz a posição no mapa)
+                top = [(mp["beatmap_id"], "") for mp in summ["maps"][:40]]
+                self.strains.request(top)
+            data = {"uid": uid, "ok": True, "summary": {**summ, "maps": summ["maps"][:10]}, "by_map": {mp["beatmap_id"]: mp for mp in summ["maps"]}}
+        except Exception as exc:  # noqa: BLE001
+            data = {"uid": uid, "ok": False, "reason": f"{type(exc).__name__}: {exc}"[:160], "by_map": {}}
+        self._fails_cache = (now, data)
+        return data
+
     def styles(self) -> dict[str, Any] | None:
         """Perfis de estilo (cache de 10 min). None se não houver tags/BD: é um extra, nunca deita a página abaixo."""
         import time
@@ -340,6 +373,8 @@ class Evolution:
                 mp["style"] = map_role(sd["maps"].get(int(mp["beatmap_id"])), prof)
                 mp["pp_need"] = need.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
                 mp["curve"] = curves.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
+                fl = self.fails_data(uid, {}).get("by_map", {}).get(int(mp["beatmap_id"]))
+                mp["fails"] = {"n": fl["fails"], "deaths": fl["deaths"], "points": fl["points"]} if fl else None
         return w
 
     def give_feedback(self, body: dict) -> dict[str, Any]:
@@ -485,6 +520,10 @@ class Evolution:
         active_weeks = [w["days"] for w in cons["weeks"] if w["days"] > 0]
         days_hist = sum(active_weeks) / len(active_weeks) if active_weeks else None
         return project(pp_now, target_pp, fit_pp_vs_level(pts), mean_level_series({a: series[a] for a in AXES}, AXES), days_hist)
+
+    def _fails_safe(self, uid: int, labels: dict[int, str]) -> dict[str, Any]:
+        d = self.fails_data(uid, labels)
+        return {"ok": d["ok"], "reason": d.get("reason"), "summary": d.get("summary")}
 
     def _styles_safe(self, uid: int) -> dict[str, Any]:
         try:

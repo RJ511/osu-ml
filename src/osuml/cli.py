@@ -786,6 +786,12 @@ def cmd_tags(args: argparse.Namespace, settings: Settings) -> int:
         return 0
     if args.tags_command == "plan":
         out: dict = {}
+        if args.phase in ("D", "all"):
+            from .recommend.core import Recommender
+
+            rec_d = Recommender(store, settings.processed_dir / "recommend" / "index", settings.processed_dir / "recommend" / "models",
+                                feedback_file=settings.data_dir / "feedback" / "recomendacoes_feedback.txt", log_predictions=False)
+            out["D"] = tq.enqueue(store, tq.plan_wide(rec_d, args.user_id, args.wide_per_skill), "D")
         if args.phase in ("B", "all"):
             from .recommend.core import Recommender
 
@@ -915,8 +921,9 @@ def main(argv: list[str] | None = None) -> int:
     tg = sub.add_parser("tags", help="tags votadas dos mapas, do mirror hinai (1 pedido por set; respeita o guard; 0 pedidos à osu!API)")
     tsub = tg.add_subparsers(dest="tags_command", required=True)
     tsub.add_parser("status", help="o que já foi recolhido, a fila, o teto diário e o estado do guard (0 pedidos)")
-    tg_plan = tsub.add_parser("plan", help="põe sets na fila por fase (B candidatos · C jogadores parecidos · A amostra); 0 pedidos")
-    tg_plan.add_argument("--phase", choices=["B", "C", "A", "all"], default="all")
+    tg_plan = tsub.add_parser("plan", help="põe sets na fila por fase (B candidatos · C jogadores parecidos · A amostra · D mais candidatos); 0 pedidos")
+    tg_plan.add_argument("--phase", choices=["B", "C", "A", "D", "all"], default="all")
+    tg_plan.add_argument("--wide-per-skill", type=int, default=1200, help="D: sugestões por skill (mais as faixas do plano semanal)")
     tg_plan.add_argument("--user-id", type=int, default=13745526)
     tg_plan.add_argument("--per-skill", type=int, default=250, help="B: sugestões por skill")
     tg_plan.add_argument("--neighbors", type=int, default=20, help="C: nº de jogadores parecidos")

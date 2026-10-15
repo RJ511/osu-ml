@@ -97,8 +97,8 @@ function render(s){
  LAST=s;const app=document.getElementById("app");app.replaceChildren();
  if(s.error){app.appendChild($("div","card span2 banner bad",s.error));return}
  app.appendChild(headerCard(s));
- const tabs=$("div","tabs");[["hoje","Hoje"],["semana","Semana"],["perfil","Perfil"],["progresso","Progresso"],["rival","Rival"]].forEach(([k,t])=>{const b=$("button",TAB===k?"on":"",t);b.onclick=()=>{TAB=k;saveTab();render(LAST)};tabs.appendChild(b)});app.appendChild(tabs);
- if(TAB==="hoje")tabHoje(app,s);else if(TAB==="semana")tabSemana(app,s);else if(TAB==="perfil")tabPerfil(app,s);else if(TAB==="progresso")tabProgresso(app,s);else if(TAB==="rival")tabRival(app,s);else tabAvisos(app,s)}
+ const tabs=$("div","tabs");[["hoje","Hoje"],["semana","Semana"],["perfil","Perfil"],["falhas","Falhas"],["progresso","Progresso"],["rival","Rival"]].forEach(([k,t])=>{const b=$("button",TAB===k?"on":"",t);b.onclick=()=>{TAB=k;saveTab();render(LAST)};tabs.appendChild(b)});app.appendChild(tabs);
+ if(TAB==="hoje")tabHoje(app,s);else if(TAB==="semana")tabSemana(app,s);else if(TAB==="perfil")tabPerfil(app,s);else if(TAB==="falhas")tabFalhas(app,s);else if(TAB==="progresso")tabProgresso(app,s);else if(TAB==="rival")tabRival(app,s);else tabAvisos(app,s)}
 function tabAvisos(app,s){const c=$("div","card span2");c.appendChild($("h2","","Avisos"));const it=(s.notifications||{}).items||[];
  if(!it.length)c.appendChild($("div","sub","Sem avisos."));it.forEach(i=>{const d=$("div","nt"+(i.read?"":" unread"));d.append($("b","",i.title),$("div","sub",i.body),$("div","note",i.at.replace("T"," ")+(i.pushed?" · enviado ao telemóvel":"")));c.appendChild(d)});app.appendChild(c)}
 function nextSession(w){const inc=x=>x.progress.done<x.progress.total;return w.sessions.find(x=>x.key!=="D"&&inc(x))||w.sessions.find(inc)||null}
@@ -169,6 +169,25 @@ function tabPerfil(app,s){
  if(S.rival)app.appendChild(styleCard(S.rival,"rival",`Rival · ${s.rival?s.rival.username:""}`));
  const n=$("div","card span2 note",`Barra = quota do estilo nos mapas que jogaste; traço = média dos ${S.n_players} jogadores acompanhados; o número à direita é o desempenho (pontos de accuracy acima/abaixo do que o modelo previa para o teu nível, só com ≥ 8 mapas nesse estilo). As classes vêm das tags votadas pela comunidade (estilo = jumps, streams, flow, alt, tech, stamina). Nos mapas do plano, "conforto" = estilo em que és forte ou que jogas muito; "crescimento" = estilo em que és fraco ou pouco jogado.`);
  app.appendChild(n)}
+function tabFalhas(app,s){
+ const F=s.fails;if(!F||!F.ok){app.appendChild($("div","card span2 sub",(F&&F.reason)||"Falhas indisponíveis."));return}
+ const S=F.summary,k=S.kinds,pc0=v=>v==null?"—":Math.round(v*100)+" %";
+ const e=$("div","card span2");e.appendChild($("h2","","Morte ou reinício?"));
+ e.appendChild($("div","sub",`${S.n} falhas analisadas (só jogadas do lazer, só mapas com ficheiro). A osu!API não diz se saíste tu ou se a vida acabou, por isso usa-se o modelo de vida do osu!: se os teus erros até ao ponto onde paraste não chegavam para a vida acabar, nem no pior caso, foi um **reinício** (saíste tu). Se chegavam, pode ter sido **morte** (e "provável" quando os erros custaram bem mais do que a vida).`.replace(/\*\*/g,"")));
+ const tb=document.createElement("table"),h=document.createElement("tr");["","Reinícios","Mortes"].forEach(t=>h.appendChild($("th","",t)));tb.appendChild(h);
+ const row=(l,f)=>{const t=document.createElement("tr");t.append($("td","",l),$("td","mono",f(k.reinicio)),$("td","mono",f(k.morte)));tb.appendChild(t)};
+ row("Quantas",x=>String(x.n));row("Em que ponto do mapa (mediana)",x=>pc0(x.progress_median));row("Accuracy quando paraste",x=>x.accuracy_median==null?"—":(x.accuracy_median*100).toFixed(1).replace(".",",")+" %");
+ row("Misses (mediana)",x=>x.miss_median==null?"—":String(x.miss_median));row("Quão intensa era a janela (percentil)",x=>pc0(x.pct_intensity_median));
+ row("Dificuldade no ponto (percentil, mirror)",x=>x.n_with_strain?pc0(x.strain_pct_median)+` (${x.n_with_strain})`:"ainda sem curvas");
+ e.appendChild(tb);
+ e.appendChild($("div","note",`Leitura: ${pc0(k.reinicio.n/Math.max(S.n,1))} das falhas são reinícios, e acontecem cedo (${pc0(k.reinicio.progress_median)} do mapa) em trechos fáceis: é escolha tua (reiniciar logo que corre mal). As mortes (${pc0(k.morte.n/Math.max(S.n,1))}) aparecem mais tarde, com mais misses e em trechos mais intensos. "Percentil da dificuldade" vem da curva de strains do mirror e só existe para os mapas já pedidos (vão sendo pedidos em fundo).`));
+ app.appendChild(e);
+ const m=$("div","card span2");m.appendChild($("h2","","Mapas onde mais falhas"));
+ S.maps.forEach(mp=>{const r=$("div","map"),a=$("a","t",mp.label);a.href="https://osu.ppy.sh/beatmaps/"+mp.beatmap_id;a.target="_blank";a.rel="noopener";r.appendChild(a);
+  const c=$("div","chips");c.appendChild(chip(`${mp.fails} falhas`));c.appendChild(chip(`${mp.deaths} mortes`,mp.deaths?"fail":""));c.appendChild(chip(`${mp.resets} reinícios`));if(mp.death_at!=null)c.appendChild(chip(`morres aos ~${Math.round(mp.death_at*100)} %`));r.appendChild(c);
+  const bar=$("div","tk");bar.style.cssText="position:relative;height:14px;margin-top:8px;border-radius:99px;background:var(--surface2)";
+  mp.points.forEach(f=>{const d=$("i");d.style.cssText=`position:absolute;top:2px;width:10px;height:10px;border-radius:50%;left:calc(${Math.min(Math.max(f.t,0),1)*100}% - 5px);`+(f.k==="morte"?"background:var(--bad)":"border:2px solid var(--warn)");bar.appendChild(d)});r.appendChild(bar);m.appendChild(r)});
+ m.appendChild($("div","note","● vermelho = morte possível; ○ laranja = reinício. A barra é o mapa de ponta a ponta."));app.appendChild(m)}
 function tabRival(app,s){
  const rv=s.rival,rc=$("div","card span2");rc.appendChild($("h2","","Rival"));
  if(!rv){rc.appendChild($("div","sub","Ainda sem rival: faltam níveis fiáveis nos 4 eixos."));app.appendChild(rc);return}
@@ -203,11 +222,13 @@ function rivalDetail(app,rv){
  tc.appendChild($("div","note","Meses com poucas jogadas (n baixo) são ruído. Só contam passes com accuracy ≥ 90 % em mapas que temos no dump; mapas mais recentes que o dump ficam de fora."));app.appendChild(tc)}
 const pc=v=>v==null?"—":(v*100).toFixed(1).replace(".",",")+" %";
 const chip=(t,c)=>$("span","chip"+(c?" "+c:""),t);
-function miniCurve(cv){
+function miniCurve(cv,fl){
  const W=300,H=30,v=cv.curve,n=v.length,svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("class","curve");svg.setAttribute("preserveAspectRatio","none");
  const x=i=>i*W/(n-1),y=a=>H-2-a/100*(H-4);let d=`M0 ${H} `;v.forEach((a,i)=>{d+=`L${x(i).toFixed(1)} ${y(a).toFixed(1)} `});d+=`L${W} ${H} Z`;
  const p=document.createElementNS(svg.namespaceURI,"path");p.setAttribute("d",d);p.setAttribute("fill","var(--accent)");p.setAttribute("opacity",".35");svg.appendChild(p);
  const px=cv.peak_pct/100*W,l=document.createElementNS(svg.namespaceURI,"line");l.setAttribute("x1",px);l.setAttribute("x2",px);l.setAttribute("y1",0);l.setAttribute("y2",H);l.setAttribute("stroke","var(--accent)");l.setAttribute("stroke-width","1.5");svg.appendChild(l);
+ if(fl&&fl.points)fl.points.forEach(f=>{const c=document.createElementNS(svg.namespaceURI,"circle");c.setAttribute("cx",Math.min(Math.max(f.t,0),1)*W);c.setAttribute("cy",f.k==="morte"?H-6:H-14);c.setAttribute("r","4");
+  c.setAttribute("fill",f.k==="morte"?"var(--bad)":"none");c.setAttribute("stroke",f.k==="morte"?"var(--bad)":"var(--warn)");c.setAttribute("stroke-width","2");svg.appendChild(c)});
  svg.appendChild(Object.assign(document.createElementNS(svg.namespaceURI,"title"),{textContent:`Dificuldade ao longo do mapa (${cv.length_s} s): pico aos ${cv.peak_pct} %`}));return svg}
 function planRow(m,test,kind){
  const r=$("div","map"),a=$("a","t",m.label);a.href=m.url;a.target="_blank";a.rel="noopener";r.appendChild(a);
@@ -218,13 +239,14 @@ function planRow(m,test,kind){
   if(n.acc_1==null)c.appendChild(chip("sem ganho de pp"));
   else c.appendChild(chip(`+1 pp ≥ ${pc(n.acc_1)}`+(n.acc_5!=null?` · +5 pp ≥ ${pc(n.acc_5)}`:"")))}
  if(m.curve)c.appendChild(chip(`pico aos ${m.curve.peak_pct} %`));
+ if(m.fails)c.appendChild(chip(`falhaste ${m.fails.n}× (${m.fails.deaths} mortes)`,m.fails.deaths?"fail":""));
  if(m.style)c.appendChild(chip(m.style.label+(m.style.role==="neutro"?"":" · "+m.style.role),m.style.role==="neutro"?"":m.style.role));
  const st=m.status;
  if(st&&st.played){if(test)c.appendChild(chip(`1.ª jogada: ${pc(st.first_acc)} ${st.first_passed?"✓":"✗"}`,st.first_passed?"pass":"fail"));
   else c.appendChild(chip(`${st.attempts} tent. · melhor ${pc(st.best_acc)}${st.passed?" ✓":" ✗"}`,st.passed?"pass":"fail"))}
  else c.appendChild(chip("por jogar"));
  r.appendChild(c);
- if(m.curve)r.appendChild(miniCurve(m.curve));
+ if(m.curve)r.appendChild(miniCurve(m.curve,m.fails));
  if(kind&&m.beatmap_id){const f=$("div","fb"),mk=(v,t,cls)=>{const b=$("button","btn "+cls+(m.verdict===v?" on":""),t);
    b.onclick=async()=>{b.disabled=true;const res=await post("/api/feedback",{beatmap_id:m.beatmap_id,verdict:v,kind:kind});if(!res.error){m.verdict=v;[...f.children].forEach(x=>x.classList.remove("on"));b.classList.add("on");
     if(v==="nao_serve"&&res.swap){b.textContent=res.swap.replaced?(res.swap.new?"trocado ✓":"removido ✓"):(res.swap.reason||"registado");if(res.swap.replaced)setTimeout(load,700)}}b.disabled=false};return b};

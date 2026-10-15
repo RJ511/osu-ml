@@ -844,7 +844,7 @@ class Recommender:
             d = {a: float(idx["axis"][j, INDEX_AXES.index(a)]) - pdata.levels[a] for a in AXES}
             out.append({"beatmap_id": bid, "label": f"{title} [{version}]" if version else title, "url": beatmap_url(bid, lab.get("set_id")),
                         "stars": round(float(x[j, 0]), 2), "ar": round(float(x[j, 5]), 2), "p_pass": round(float(p[j]), 3), "acc_pass": round(float(acc[j]), 4),
-                        "dominant": max(d, key=d.get), "mods": mods_key})
+                        "dominant": max(d, key=d.get), "mods": mods_key, "beatmapset_id": lab.get("set_id") or None})
         return out
 
     def recommend_many(self, user_id: int, skills: list[str], n: int = 20, focus: str = DEFAULT_FOCUS, mods_list: list[str] | None = None,
