@@ -556,7 +556,7 @@ class Recommender:
         if mods:
             p_pass, acc, mods_cal = self._mods_adjust(mods, p_pass, acc)  # ajuste global medido com jogadas reais com esses mods (se existir)
         blocked_user = self._blocked_mask(user_id)
-        blocked = blocked_user | unavailable
+        blocked = blocked_user | unavailable | self._unavailable_mask(n_maps)
         min_safe, min_fb = MIN_PASS_PROB, MIN_PASS_PROB_FALLBACK
         if mods:  # com DT a probabilidade calibrada varia pouco (o modelo distingue mal fácil de difícil): "seguro" = décimo melhor das previsões, "arriscado" = quarto melhor
             pool_m = cand & (acc >= MIN_EXPECTED_ACC) & ~blocked
@@ -671,6 +671,7 @@ class Recommender:
             items += pick(min_fb, max(n - len(amb_items) - n_safe, 0), "arriscado")
         items = amb_items + items if focus == "pp" else items + amb_items  # foco pp: os ambiciosos primeiro; equilibrado: depois dos seguros
         _, new_ok, retry_ok, replay_ok = eligible(min_safe)
+        self._request_availability(items)
         if self.log_predictions and items and _log:  # regista (com os mods e o foco): o resultado só conta jogadas com exatamente esses mods
             try:
                 from .log import log_recommendations
@@ -701,6 +702,32 @@ class Recommender:
                              f"(AUC ~{(mods_cal.get('auc_before') or 0):.2f}), por isso 'seguro' = décimo melhor das previsões (≥ {min_safe * 100:.0f} %), não ≥ 80 %; accuracy pela vista "
                              f"{'nomod' if mods_cal.get('acc_source') == 'nomod' else 'DT'} com deslocamento {float(mods_cal.get('acc_shift') or 0) * 100:+.1f} pts. Previsões indicativas."]
                             if mods and mods_cal else [])]}
+
+    # ------------------------------------------------------------------ disponibilidade de download (mirror)
+    def _unavailable_mask(self, n_maps: int):
+        """Máscara dos mapas cujo set o mirror diz que já não se descarrega (cache `availability`; vazia se não houver). O resultado vem de pedidos ao mirror, não da osu!API."""
+        import numpy as np
+
+        av = getattr(self, "availability", None)
+        if av is None:
+            return np.zeros(n_maps, dtype=bool)
+        bad = av.unavailable_sets()
+        if not bad:
+            return np.zeros(n_maps, dtype=bool)
+        sets = getattr(self, "_set_array", None)
+        if sets is None or len(sets) != n_maps:
+            labels, ids = self._index["labels"], self._index["ids"]
+            sets = np.array([int((labels.get(int(i)) or {}).get("set_id") or 0) for i in ids], dtype=np.int64)
+            self._set_array = sets
+        return np.isin(sets, np.fromiter(bad, dtype=np.int64))
+
+    def _request_availability(self, items) -> None:
+        av = getattr(self, "availability", None)
+        if av is not None:
+            try:  # verifica em fundo os sets sugeridos (cache de 7 dias): a próxima vez os indisponíveis já não aparecem
+                av.request([it.get("beatmapset_id") or it.get("beatmapset") for it in items])
+            except Exception:  # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------------ estilo por tags (evolution/styles.py)
     def _tag_ctx(self, user_id: int) -> dict[str, Any] | None:
@@ -823,6 +850,7 @@ class Recommender:
             played[list(pdata.played)] = True
             mask &= ~played
         mask &= ~self._blocked_mask(user_id)
+        mask &= ~self._unavailable_mask(len(mask))
         rows = np.nonzero(mask)[0]
         if not len(rows):
             return []

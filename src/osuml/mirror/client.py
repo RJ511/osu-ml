@@ -19,7 +19,7 @@ from ..tags.collect import GUARD_CHECK_EVERY, MAX_CONSEC_ERRORS, MAX_RETRY_AFTER
 
 log = logging.getLogger(__name__)
 
-DAILY_CAPS = {"osu": 1000, "goal": 3, "strains": 300, "rankings": 450}   # pedidos por dia UTC e por finalidade
+DAILY_CAPS = {"osu": 1000, "goal": 3, "strains": 300, "rankings": 450, "availability": 300}   # pedidos por dia UTC e por finalidade
 OSU_SKIP_DAYS = 30                                      # um mapa que o mirror não tem (404) ou com MD5 diferente não se volta a pedir durante 30 dias
 OSU_HEADER = b"osu file format v"
 
@@ -410,3 +410,149 @@ def snapshot_rankings(client: MirrorClient, usage: Usage, out_dir: Path, scope: 
     elif rows:
         partial.write_bytes(gzip.compress(json.dumps({"rows": rows, "next_page": page}).encode("utf-8")))
     return out
+
+
+# ------------------------------------------------------------------ disponibilidade de download dos sets
+AVAIL_TTL_DAYS = 7           # um resultado claro (pode/não pode descarregar) repete-se ao fim de 7 dias
+AVAIL_UNKNOWN_TTL_DAYS = 1   # "não sei" repete-se ao fim de 1 dia
+
+
+def parse_availability(status_code: int, data: dict[str, Any] | None) -> dict[str, Any]:
+    """{available: True | False | None, why}: **False** só quando é claro (download desativado pelo osu! ou retirado pelo mirror); **None** = não sei
+    (`download_disabled: null` não se lê como "pode descarregar"); **True** quando o osu! diz que o download está ativo e não há takedown."""
+    if status_code == 404:
+        code = (data or {}).get("code") if isinstance(data, dict) else None
+        return {"available": False, "why": "retirado (takedown)"} if code == "content_removed" else {"available": None, "why": "o mirror não conhece o set"}
+    d = data or {}
+    if (d.get("takedown") or {}).get("removed") is True:
+        return {"available": False, "why": "retirado pelo mirror (takedown)"}
+    av = d.get("availability") or {}
+    flag = av.get("download_disabled")
+    if flag is True:
+        return {"available": False, "why": "download desativado pelo osu!" + (f": {av.get('more_information')}" if av.get("more_information") else "")}
+    if flag is False:
+        return {"available": True, "why": "download ativo", "source": av.get("source")}
+    return {"available": None, "why": "estado desconhecido (ninguém verificou)", "source": av.get("source")}
+
+
+class AvailabilityCache:
+    """`data/control/mirror_availability.json`: {set_id: {available, why, at}}."""
+
+    def __init__(self, path: Path, today=None) -> None:
+        self.path = Path(path)
+        self._today = today or (lambda: datetime.now(timezone.utc).date())
+
+    def load(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def save(self, d: dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def get(self, set_id: int) -> dict[str, Any] | None:
+        return self.load().get(str(set_id))
+
+    def stale(self, set_ids) -> list[int]:
+        """Sets sem resultado, ou com resultado vencido (7 dias; 1 dia se era "não sei")."""
+        d, today, out = self.load(), self._today(), []
+        for sid in dict.fromkeys(int(x) for x in set_ids if x):
+            e = d.get(str(sid))
+            if e is None:
+                out.append(sid)
+                continue
+            ttl = AVAIL_UNKNOWN_TTL_DAYS if e.get("available") is None else AVAIL_TTL_DAYS
+            if (today - date.fromisoformat(e["at"])).days >= ttl:
+                out.append(sid)
+        return out
+
+    def unavailable_sets(self) -> set[int]:
+        return {int(k) for k, v in self.load().items() if v.get("available") is False}
+
+
+def check_availability(client: MirrorClient, usage: Usage, cache: AvailabilityCache, set_ids, *, max_wait_guard_s: float = 600.0) -> dict[str, Any]:
+    """Pergunta ao mirror (`/v3/osu/beatmaps/s/{id}/availability`, local-first) o estado dos sets que faltam ou venceram. Para por teto diário, guard vermelho ou 3 falhas seguidas."""
+    todo = cache.stale(set_ids)
+    out: dict[str, Any] = {"planned": len(todo), "checked": 0, "unavailable": 0, "unknown": 0, "aborted": None}
+    if not todo:
+        return out
+    entries = cache.load()
+    consec = 0
+    try:
+        client.calm(max_wait_guard_s)
+        for i, sid in enumerate(todo):
+            if usage.remaining("availability") <= 0:
+                raise Abort(f"teto diário de verificações atingido ({DAILY_CAPS['availability']})")
+            if i and i % GUARD_CHECK_EVERY == 0:
+                client.calm(max_wait_guard_s)
+            try:
+                resp = client.get(f"/v3/osu/beatmaps/s/{sid}/availability")
+                consec = 0
+            except _Retryable as exc:
+                consec += 1
+                if consec >= MAX_CONSEC_ERRORS:
+                    raise Abort(f"{consec} falhas seguidas (último: {exc}); parei") from exc
+                client._sleep(min(exc.retry_after, MAX_RETRY_AFTER_S))
+                continue
+            usage.add("availability")
+            try:
+                data = resp.json()
+            except ValueError:
+                data = None
+            res = parse_availability(resp.status_code, data)
+            entries[str(sid)] = {**res, "at": datetime.now(timezone.utc).date().isoformat()}
+            out["checked"] += 1
+            out["unavailable"] += res["available"] is False
+            out["unknown"] += res["available"] is None
+    except Abort as exc:
+        out["aborted"] = str(exc)
+    cache.save(entries)
+    out["requests"] = client.requests
+    return out
+
+
+class AvailabilityPrefetcher:
+    """Pede em fundo (1 fio de cada vez) a disponibilidade dos sets que faltam; expõe `unavailable_sets()` e `get()` à cache para o recomendador e a página."""
+
+    def __init__(self, store: Any, cache_path: Path, usage_path: Path, max_per_run: int = 60) -> None:
+        import threading
+
+        self.store, self.cache, self.usage_path, self.max_per_run = store, AvailabilityCache(cache_path), Path(usage_path), max_per_run
+        self._lock = threading.Lock()
+        self._busy = False
+        self.last: dict[str, Any] = {}
+
+    def unavailable_sets(self) -> set[int]:
+        return self.cache.unavailable_sets()
+
+    def get(self, set_id: int) -> dict[str, Any] | None:
+        return self.cache.get(set_id)
+
+    def request(self, set_ids) -> bool:
+        import threading
+
+        todo = self.cache.stale(set_ids)[: self.max_per_run]
+        if not todo:
+            return False
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
+
+        def run() -> None:
+            client = MirrorClient(self.store)
+            try:
+                self.last = check_availability(client, Usage(self.usage_path), self.cache, todo)
+            except Exception as exc:  # noqa: BLE001 - extra: nunca deita o painel abaixo
+                self.last = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            finally:
+                client.close()
+                with self._lock:
+                    self._busy = False
+
+        threading.Thread(target=run, name="availability-prefetch", daemon=True).start()
+        return True

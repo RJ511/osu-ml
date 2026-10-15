@@ -241,6 +241,7 @@ function planRow(m,test,kind){
  if(m.pp_need){const n=m.pp_need;
   if(n.acc_1==null)c.appendChild(chip("sem ganho de pp"));
   else c.appendChild(chip(`+1 pp ≥ ${pc(n.acc_1)}`+(n.acc_5!=null?` · +5 pp ≥ ${pc(n.acc_5)}`:"")))}
+ if(m.avail&&m.avail.available===false){const q=chip("download indisponível","fail");q.title=m.avail.why;c.appendChild(q)}
  if(m.curve)c.appendChild(chip(`pico aos ${m.curve.peak_pct} %`));
  if(m.fails&&m.fails.deaths)c.appendChild(chip(`morreste ${m.fails.deaths}× aqui`,"fail"));
  if(m.style)c.appendChild(chip(m.style.label+(m.style.role==="neutro"?"":" · "+m.style.role),m.style.role==="neutro"?"":m.style.role));

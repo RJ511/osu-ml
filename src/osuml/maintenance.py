@@ -702,3 +702,29 @@ def db_backup(settings, store, label: str = "weekly", *, now: datetime | None = 
     save_state(settings, state)
     log_event(settings, {"task": "db-backup", "label": label, "uploaded": True, "key": out["keys"][0], "bytes": out["db_bytes"]})
     return out
+
+
+def availability_check(settings, store, *, client_factory: Callable[[Any], Any] | None = None) -> dict[str, Any]:
+    """Verifica no mirror (`/availability`, local-first; não gasta a quota da osu!API do projeto) os sets dos mapas do plano da semana, os que ainda não têm resultado
+    válido na cache (7 dias). Os indisponíveis são trocados no plano pela página na atualização seguinte."""
+    import glob
+
+    from .mirror.client import AvailabilityCache, MirrorClient, Usage, check_availability
+
+    sets: list[int] = []
+    for f in sorted(glob.glob(str(settings.data_dir / "control" / "weekly" / "*_????-W??.json")))[-1:]:
+        plan = json.loads(Path(f).read_text(encoding="utf-8"))
+        from sqlalchemy import select
+
+        from .storage import models as m
+
+        ids = [mp["beatmap_id"] for mp in plan["test"]["maps"]] + [mp["beatmap_id"] for s in plan["sessions"] for mp in s["maps"] + s.get("alternative", [])]
+        with store.engine.connect() as c:
+            sets = [int(r[0]) for r in c.execute(select(m.beatmaps.c.beatmapset_id).where(m.beatmaps.c.beatmap_id.in_(ids))) if r[0]]
+    client = (client_factory or MirrorClient)(store)
+    try:
+        out = check_availability(client, Usage(settings.data_dir / "control" / "mirror_usage.json"), AvailabilityCache(settings.data_dir / "control" / "mirror_availability.json"), sets)
+    finally:
+        client.close()
+    log_event(settings, {"task": "availability", **{k: v for k, v in out.items() if k != "requests"}})
+    return out

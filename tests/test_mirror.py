@@ -136,3 +136,65 @@ def test_strains_are_cached_on_disk_and_compacted(tmp_path):
     assert mc.compact_curve({"unavailable": True}) is None and mc.compact_curve(None) is None
     (raw / "7_NM.json.gz").write_bytes(gzip.compress(b'{"unavailable": true}'))
     assert mc.load_strains(raw, 7, "") == {"unavailable": True}
+
+
+# ------------------------------------------------------------------ disponibilidade de download
+def _avail_json(disabled=False, removed=False, source="local_raw", info=None):
+    return {"success": True, "availability": {"download_disabled": disabled, "more_information": info, "source": source}, "takedown": {"removed": removed}}
+
+
+def test_parse_availability_is_only_negative_when_it_is_clear():
+    p = mc.parse_availability
+    assert p(200, _avail_json(False))["available"] is True
+    assert p(200, _avail_json(True, info="DMCA"))["available"] is False and "DMCA" in p(200, _avail_json(True, info="DMCA"))["why"]
+    assert p(200, _avail_json(None, source="unknown"))["available"] is None  # null não é "pode descarregar"
+    assert p(200, _avail_json(False, removed=True))["available"] is False  # takedown do mirror manda
+    assert p(404, {"code": "content_removed"})["available"] is False and p(404, {"code": "not_archived"})["available"] is None and p(404, None)["available"] is None
+
+
+def test_availability_cache_ttls_and_check_marks_unavailable_sets(tmp_path):
+    day = [__import__("datetime").date(2026, 10, 15)]
+    cache = mc.AvailabilityCache(tmp_path / "a.json", today=lambda: day[0])
+    st = _store(tmp_path)
+
+    class Av:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, req: httpx.Request) -> httpx.Response:
+            if req.url.path.endswith("/guard"):
+                return httpx.Response(200, json={"pressure_active": False, "pain_last_60s": 0, "thresholds": {"pain_60s": 5, "retry_after_s": 120}})
+            sid = int(req.url.path.split("/s/")[1].split("/")[0])
+            self.calls.append(sid)
+            if sid == 2:
+                return httpx.Response(200, json=_avail_json(True, info="removido a pedido do autor"))
+            if sid == 3:
+                return httpx.Response(200, json=_avail_json(None, source="unknown"))
+            if sid == 4:
+                return httpx.Response(404, json={"code": "content_removed"})
+            return httpx.Response(200, json=_avail_json(False))
+
+    fake = Av()
+    out = mc.check_availability(_client(st, fake), mc.Usage(tmp_path / "u.json"), cache, [1, 2, 3, 4, 2, None])
+    assert out["checked"] == 4 and out["unavailable"] == 2 and out["unknown"] == 1 and sorted(fake.calls) == [1, 2, 3, 4]  # duplicados e None ignorados
+    assert cache.unavailable_sets() == {2, 4} and cache.get(1)["available"] is True
+    assert cache.stale([1, 2, 3, 4, 5]) == [5]  # os recentes não se repetem
+    day[0] = __import__("datetime").date(2026, 10, 16)
+    assert cache.stale([1, 2, 3]) == [3]  # "não sei" repete-se ao fim de 1 dia
+    day[0] = __import__("datetime").date(2026, 10, 22)
+    assert sorted(cache.stale([1, 2, 3])) == [1, 2, 3]  # os claros vencem aos 7 dias
+    again = mc.check_availability(_client(st, Av()), mc.Usage(tmp_path / "u2.json"), mc.AvailabilityCache(tmp_path / "a.json", today=lambda: day[0]), [1])
+    assert again["checked"] == 1
+
+
+def test_recommender_masks_out_maps_of_unavailable_sets():
+    import numpy as np
+
+    from osuml.recommend.core import Recommender
+
+    rec = Recommender.__new__(Recommender)
+    rec._index = {"ids": np.array([10, 11, 12, 13]), "labels": {10: {"set_id": 1}, 11: {"set_id": 1}, 12: {"set_id": 2}}}  # 13 sem set conhecido
+    rec.availability = None
+    assert not rec._unavailable_mask(4).any()  # sem verificação: nada fica de fora
+    rec.availability = type("A", (), {"unavailable_sets": lambda self: {1}, "request": lambda self, ids: None})()
+    assert list(rec._unavailable_mask(4)) == [True, True, False, False]  # todas as dificuldades do set indisponível

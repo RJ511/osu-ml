@@ -52,10 +52,11 @@ def _week_start(d: date) -> date:
 
 class Evolution:
     def __init__(self, explorer: Any, goal_path: Path, today: Any = None, weekly: Any | None = None, notifier: Any | None = None,
-                 recommender: Any | None = None, checker: Any | None = None, live: Any | None = None, strains: Any | None = None) -> None:
+                 recommender: Any | None = None, checker: Any | None = None, live: Any | None = None, strains: Any | None = None, availability: Any | None = None) -> None:
         self.explorer = explorer
         self.notifier, self.recommender, self.checker, self.live = notifier, recommender, checker, live
         self.strains = strains  # mirror.client.StrainsPrefetcher (dificuldade ao longo do mapa); opcional
+        self.availability = availability  # mirror.client.AvailabilityPrefetcher (download disponível?); opcional
         self.weekly = weekly  # evolution.weekly.WeeklyPlanner (teste semanal + sessões); opcional
         self.goal_path = Path(goal_path)
         self.rival_path = self.goal_path.parent / "rival.json"
@@ -271,6 +272,47 @@ class Evolution:
         return out
 
     # ------------------------------------------------------------------ ações (feedback, verificar)
+    def _set_of(self, beatmap_id: int) -> int | None:
+        """Set de um mapa: da BD (mapas jogados) ou do índice do recomendador."""
+        try:
+            from sqlalchemy import select
+
+            from ..storage import models as m
+
+            with self.explorer.store.engine.connect() as c:
+                r = c.execute(select(m.beatmaps.c.beatmapset_id).where(m.beatmaps.c.beatmap_id == beatmap_id)).first()
+            if r and r[0]:
+                return int(r[0])
+            if self.recommender is not None:
+                self.recommender._load()
+                sid = (self.recommender._index["labels"].get(beatmap_id) or {}).get("set_id")
+                return int(sid) if sid else None
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _swap_unavailable(self, uid: int, plays: list[dict[str, Any]], today: date) -> None:
+        """Mapas do plano (ainda por jogar) cujo set o mirror já disse não ser descarregável: trocam-se por outro (só consulta a cache; os pedidos fazem-se em fundo)."""
+        if self.availability is None or self.weekly is None or self.recommender is None:
+            return
+        bad = self.availability.unavailable_sets()
+        if not bad:
+            return
+        try:
+            from . import weekly as wk
+
+            f = self.weekly._plan_file(uid, wk.week_id(today))
+            if not f.exists():
+                return
+            plan = json.loads(f.read_text(encoding="utf-8"))
+            ids = [mp["beatmap_id"] for mp in plan["test"]["maps"]] + [mp["beatmap_id"] for s in plan["sessions"] for mp in s["maps"] + s.get("alternative", [])]
+            gone = [b for b in dict.fromkeys(ids) if self._set_of(int(b)) in bad]
+            rej = {b for b, v in self._verdicts(uid).items() if v == "nao_serve"}
+            for b in gone[:6]:
+                self.weekly.reject(uid, int(b), plays, rej | set(gone), today)
+        except Exception:  # noqa: BLE001 - extra: nunca deita a página abaixo
+            return
+
     def fails_data(self, uid: int, labels: dict[int, str]) -> dict[str, Any]:
         """Falhas (reinício vs morte, onde) do jogador, com cache de 10 min; os mapas das falhas entram na fila de strains do mirror. Nunca deita a página abaixo."""
         import time
@@ -373,8 +415,19 @@ class Evolution:
                 self.strains.request([k for k in items if curves.get(k) is None])
             except Exception:  # noqa: BLE001
                 curves = {}
+        avail: dict[int, Any] = {}
+        if self.availability is not None:
+            try:  # estado de download dos sets do plano (do mirror, em cache); o que falta pede-se em fundo
+                bids = list({int(mp["beatmap_id"]) for g in groups for mp in g})
+                sets = {b: self._set_of(b) for b in bids}
+                self.availability.request(list(sets.values()))
+                avail = {b: self.availability.get(s) for b, s in sets.items() if s}
+            except Exception:  # noqa: BLE001
+                avail = {}
         for g in groups:
             for mp in g:
+                a = avail.get(int(mp["beatmap_id"]))
+                mp["avail"] = {"available": a["available"], "why": a["why"]} if a else None
                 mp["verdict"] = v.get(int(mp["beatmap_id"]))
                 mp["style"] = map_role(sd["maps"].get(int(mp["beatmap_id"])), prof)
                 mp["pp_need"] = need.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
@@ -421,6 +474,7 @@ class Evolution:
             prof = (sd["build"].get("players") or {}).get(uid)
             rv = (self._rival_state().get("current") or {}).get("user_id")
             ctx = {"maps": sd["maps"], "profile": prof, "rival": (sd["build"].get("players") or {}).get(rv) if rv else None} if prof else None
+            self._swap_unavailable(uid, plays, today)
             return self._with_verdicts(self.weekly.state(uid, plays, goal, today, rejected=rej, style_ctx=ctx), uid)
         except Exception as exc:  # a semana de treino é um extra: nunca pode deitar a página abaixo
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"[:200]}
