@@ -524,6 +524,10 @@ def retrain_finish(settings, store, outputs: Path, snapshot: str, *, osu_files: 
     (control_dir(settings) / "retrain_pending.json").unlink(missing_ok=True)
     (control_dir(settings) / "retrain_failed.json").unlink(missing_ok=True)
     out["installed"] = True
+    try:  # cópia de segurança logo a seguir ao retreino (modelos novos + ajustes recalculados); nunca desfaz o retreino
+        out["backup"] = db_backup(settings, store, f"retrain-{snapshot}")
+    except Exception as exc:  # noqa: BLE001
+        out["backup"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     log_event(settings, {"task": "retrain-finish", "snapshot": snapshot, "installed": True, "metrics": out["metrics"], "calibration": out["calibration"]})
     return out
 
@@ -598,4 +602,103 @@ def goal_refresh(settings, store, *, force: bool = False, client_factory: Callab
     finally:
         client.close()
     log_event(settings, {"task": "goal-refresh", **out})
+    return out
+
+
+def rankings_snapshot(settings, store, *, scopes: tuple[str, ...] = ("PT", "global"), client_factory: Callable[[Any], Any] | None = None) -> dict[str, Any]:
+    """Guarda o ranking do dia (Portugal inteiro + top 10 000 global) em `data/processed/rankings/` (≈ 400 pedidos ao mirror, ~8 min; retomável)."""
+    from .mirror.client import MirrorClient, Usage, snapshot_rankings
+
+    client = (client_factory or MirrorClient)(store)
+    out: dict[str, Any] = {}
+    try:
+        usage = Usage(settings.data_dir / "control" / "mirror_usage.json")
+        for sc in scopes:
+            out[sc] = snapshot_rankings(client, usage, settings.processed_dir / "rankings", sc)
+            if out[sc].get("aborted"):
+                break  # guard/teto/erros: não insistir com o outro âmbito
+    finally:
+        client.close()
+    log_event(settings, {"task": "rankings", **{f"{k}_{kk}": vv for k, v in out.items() for kk, vv in v.items() if kk in ("rows", "complete", "pages", "aborted")}})
+    return out
+
+
+# ------------------------------------------------------------------ cópias de segurança da base de dados (S3 privado)
+BACKUP_PREFIX = "backups/db"
+BACKUP_KEEP = {"weekly": 8}   # as semanais mais recentes; as `retrain-*` ficam todas (poucas e valiosas)
+
+
+def db_backup(settings, store, label: str = "weekly", *, now: datetime | None = None, uploader: Callable[[Path, str], dict] | None = None,
+              pruner: Callable[[str, int], list[str]] | None = None) -> dict[str, Any]:
+    """Cópia consistente da base de dados SQLite (`sqlite3.backup`, sem parar nada) + `data/control/` (metas, plano, rival, estado), comprimidas e enviadas para o S3 privado
+    (AES256, tamanho verificado) em `backups/db/<label>/`. `label` = `weekly` (guarda as 8 últimas) ou `retrain-<dump>` (todas). Nunca envia `.env` nem `data/raw`.
+    A cópia local temporária apaga-se depois do envio; se o envio falhar, fica em `data/backups/` para não perder a cópia."""
+    import gzip
+    import sqlite3
+    import tarfile
+
+    when = now or datetime.now(timezone.utc)
+    out: dict[str, Any] = {"label": label, "uploaded": False}
+    if store.engine.url.get_backend_name() != "sqlite" or not store.engine.url.database:
+        out["reason"] = "só se faz cópia automática de SQLite"
+        return out
+    stamp = when.strftime("%Y%m%d-%H%M")
+    bdir = settings.data_dir / "backups"
+    bdir.mkdir(parents=True, exist_ok=True)
+    raw_db, db_gz, ctl_gz = bdir / f"osuml-{stamp}.db", bdir / f"osuml-{label}-{stamp}.db.gz", bdir / f"control-{label}-{stamp}.tar.gz"
+    src = sqlite3.connect(str(store.engine.url.database))
+    dst = sqlite3.connect(str(raw_db))
+    try:
+        src.backup(dst)  # cópia consistente mesmo com o painel/poll a escrever
+    finally:
+        dst.close()
+        src.close()
+    with raw_db.open("rb") as fi, gzip.open(db_gz, "wb", compresslevel=6) as fo:
+        shutil.copyfileobj(fi, fo)
+    raw_db.unlink(missing_ok=True)
+    with tarfile.open(ctl_gz, "w:gz") as tar:
+        ctl = control_dir(settings)
+        for f in sorted(ctl.rglob("*")):
+            if f.is_file() and f.suffix not in (".lock", ".tmp"):
+                tar.add(f, arcname=f"control/{f.relative_to(ctl).as_posix()}")
+    if uploader is None:
+        from .storage.s3 import upload_pack
+
+        def uploader(path, key):  # noqa: E306
+            return upload_pack(Path(path), settings.s3_bucket, settings.s3_region, key)
+    prefix = f"{BACKUP_PREFIX}/{label}/"
+    try:
+        r1, r2 = uploader(db_gz, prefix + db_gz.name), uploader(ctl_gz, prefix + ctl_gz.name)
+    except Exception as exc:  # noqa: BLE001 — a cópia local fica para tentar de novo
+        out.update(error=f"{type(exc).__name__}: {exc}"[:300], local_kept=str(bdir))
+        log_event(settings, {"task": "db-backup", **out})
+        return out
+    out.update(uploaded=True, keys=[prefix + db_gz.name, prefix + ctl_gz.name], db_bytes=db_gz.stat().st_size, control_bytes=ctl_gz.stat().st_size)
+    db_gz.unlink(missing_ok=True)
+    ctl_gz.unlink(missing_ok=True)
+    keep = BACKUP_KEEP.get(label)
+    if keep:
+        if pruner is None:
+            def pruner(prefix_, keep_):  # noqa: E306
+                import boto3
+
+                c = boto3.client("s3", region_name=settings.s3_region)
+                objs = c.list_objects_v2(Bucket=settings.s3_bucket, Prefix=prefix_).get("Contents", [])
+                by_kind: dict[str, list[str]] = {}
+                for o in objs:
+                    by_kind.setdefault(Path(o["Key"]).name.split("-")[0], []).append(o["Key"])  # "osuml" (base) e "control"
+                gone = []
+                for keys in by_kind.values():
+                    for k in sorted(keys)[:-keep_]:
+                        c.delete_object(Bucket=settings.s3_bucket, Key=k)
+                        gone.append(k)
+                return gone
+        try:
+            out["pruned"] = pruner(prefix, keep)
+        except Exception as exc:  # noqa: BLE001 — limpar é secundário
+            out["prune_error"] = f"{type(exc).__name__}: {exc}"[:200]
+    state = load_state(settings)
+    state.setdefault("db_backup", {})[label.split("-")[0]] = {"label": label, "at": when.isoformat(timespec="seconds"), "key": out["keys"][0], "bytes": out["db_bytes"]}
+    save_state(settings, state)
+    log_event(settings, {"task": "db-backup", "label": label, "uploaded": True, "key": out["keys"][0], "bytes": out["db_bytes"]})
     return out

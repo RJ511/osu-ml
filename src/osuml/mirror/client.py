@@ -19,7 +19,7 @@ from ..tags.collect import GUARD_CHECK_EVERY, MAX_CONSEC_ERRORS, MAX_RETRY_AFTER
 
 log = logging.getLogger(__name__)
 
-DAILY_CAPS = {"osu": 1000, "goal": 3, "strains": 300}   # pedidos por dia UTC e por finalidade
+DAILY_CAPS = {"osu": 1000, "goal": 3, "strains": 300, "rankings": 450}   # pedidos por dia UTC e por finalidade
 OSU_SKIP_DAYS = 30                                      # um mapa que o mirror não tem (404) ou com MD5 diferente não se volta a pedir durante 30 dias
 OSU_HEADER = b"osu file format v"
 
@@ -324,3 +324,89 @@ class StrainsPrefetcher:
 
         threading.Thread(target=run, name="strains-prefetch", daemon=True).start()
         return True
+
+
+# ------------------------------------------------------------------ rankings diários (PT + top 10 000 global)
+RANKING_PAGE = 50
+RANKING_MAX_PAGES = 200            # a osu!API só pagina até ao 10 000.º
+RANKING_SCOPES = {"PT": {"country": "PT"}, "global": {}}
+
+
+def _ranking_rows(data: dict[str, Any], page: int, scope: str, day: str) -> list[dict[str, Any]]:
+    rows = ((data.get("data") or data).get("ranking")) or []
+    out = []
+    for i, r in enumerate(rows):
+        out.append({"scope": scope, "date": day, "rank": (page - 1) * RANKING_PAGE + i + 1, "user_id": int(r["id"]), "username": r.get("username"),
+                    "pp": float(r["pp"]) if r.get("pp") is not None else None, "global_rank": r.get("global_rank"), "play_count": r.get("play_count"),
+                    "play_time": r.get("play_time"), "accuracy": r.get("accuracy"), "country": r.get("country_code")})
+    return out
+
+
+def snapshot_rankings(client: MirrorClient, usage: Usage, out_dir: Path, scope: str, *, day: str | None = None, max_pages: int = RANKING_MAX_PAGES,
+                      max_wait_guard_s: float = 1800.0) -> dict[str, Any]:
+    """Guarda o ranking de pp (`PT` = todo o país; `global` = top 10 000) do dia em `out_dir/<scope>_<AAAA-MM-DD>.parquet` (rank, jogador, pp, playcount, tempo jogado,
+    accuracy). Uma página (50 jogadores) por pedido, `cursor` em JSON. Retomável no mesmo dia (`.partial.json.gz`); se já existe o do dia não pede nada.
+    Para por teto diário, guard vermelho ou 3 falhas seguidas, deixando o parcial para a execução seguinte."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    day = day or datetime.now(timezone.utc).date().isoformat()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final, partial = out_dir / f"{scope}_{day}.parquet", out_dir / f"{scope}_{day}.partial.json.gz"
+    out: dict[str, Any] = {"scope": scope, "date": day, "complete": False, "aborted": None, "pages": 0}
+    if final.exists():
+        out.update(complete=True, skipped="já existe o ranking de hoje")
+        return out
+    rows: list[dict[str, Any]] = []
+    page = 1
+    if partial.exists():
+        try:
+            d = json.loads(gzip.decompress(partial.read_bytes()))
+            rows, page = d["rows"], int(d["next_page"])
+        except (OSError, ValueError, KeyError):
+            rows, page = [], 1
+    extra = RANKING_SCOPES[scope]
+    consec, done_all = 0, False
+    try:
+        client.calm(max_wait_guard_s)
+        n = 0
+        while page <= max_pages:
+            if usage.remaining("rankings") <= 0:
+                raise Abort(f"teto diário de rankings atingido ({DAILY_CAPS['rankings']})")
+            if n and n % GUARD_CHECK_EVERY == 0:
+                client.calm(max_wait_guard_s)
+            try:
+                resp = client.get("/v3/osu/rankings/osu/performance", params={**extra, "cursor": json.dumps({"page": page})})
+                consec = 0
+            except _Retryable as exc:
+                consec += 1
+                if consec >= MAX_CONSEC_ERRORS:
+                    raise Abort(f"{consec} falhas seguidas (último: {exc}); parei") from exc
+                client._sleep(min(exc.retry_after, MAX_RETRY_AFTER_S))
+                continue
+            usage.add("rankings")
+            n += 1
+            out["pages"] += 1
+            if resp.status_code != 200:
+                raise Abort(f"HTTP {resp.status_code} na página {page}")
+            got = _ranking_rows(resp.json(), page, scope, day)
+            rows += got
+            page += 1
+            if len(got) < RANKING_PAGE:  # última página (ou vazia)
+                done_all = True
+                break
+        else:
+            done_all = True  # chegou ao limite de páginas da osu!API
+    except Abort as exc:
+        out["aborted"] = str(exc)
+    out["rows"] = len(rows)
+    if done_all and rows:
+        tmp = final.with_suffix(".tmp")
+        pq.write_table(pa.Table.from_pylist(rows), tmp)
+        tmp.replace(final)
+        partial.unlink(missing_ok=True)
+        out["complete"] = True
+    elif rows:
+        partial.write_bytes(gzip.compress(json.dumps({"rows": rows, "next_page": page}).encode("utf-8")))
+    return out

@@ -76,6 +76,8 @@ cd data/processed/maintenance/retrain && mkdir -p outputs && tar -xf retrain_out
 .venv/Scripts/python.exe -m osuml maintenance retrain-finish --outputs data/processed/maintenance/retrain/outputs --snapshot AAAA_MM_DD \
     --osu-files data/processed/maintenance/retrain/osu_files.tar.bz2
 ```
+Depois de instalar os modelos, o `retrain-finish` faz **automaticamente uma cópia de segurança** da base de dados e de `data/control` para o S3 privado (`backups/db/retrain-<dump>/`, nunca apagada); se a cópia falhar, o retreino não é desfeito (aparece em `backup.error` e a cópia local fica em `data/backups/`).
+
 O `retrain-finish`: **recusa** o modelo novo se o AUC cair > 0,02 ou o MAE subir > 0,004 face ao atual (código de saída 2, `retrain_failed.json`; nada é alterado); senão reconstrói o índice em `index_new`,
 recalibra P(passar) com os jogadores da API **depois** do dump (com poucos pares na 1.ª semana do mês mantém a calibração anterior e diz-o), troca as pastas (as antigas ficam como
 `models_prev_<data>` / `index_prev_<data>`), refaz a avaliação-sombra dos últimos 90 dias com o modelo novo (para os ajustes por jogador), atualiza `maintenance_state.json` e apaga o pedido pendente.

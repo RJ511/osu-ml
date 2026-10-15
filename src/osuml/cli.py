@@ -713,6 +713,10 @@ def cmd_maintenance(args: argparse.Namespace, settings: Settings) -> int:
         out = mt.maps_load(settings, _store(settings), window_days=args.window_days, force=args.force, categorize=not args.no_categorize)
     elif step == "osu-fill":
         out = mt.osu_fill(settings, _store(settings), include_others=args.include_others, limit=args.limit, categorize=not args.no_categorize)
+    elif step == "rankings":
+        out = mt.rankings_snapshot(settings, _store(settings), scopes=("PT", "global") if args.scope == "all" else (args.scope,))
+    elif step == "db-backup":
+        out = mt.db_backup(settings, _store(settings), args.label)
     elif step == "goal-refresh":
         out = mt.goal_refresh(settings, _store(settings), force=args.force)
     elif step == "retrain-plan":
@@ -964,6 +968,10 @@ def main(argv: list[str] | None = None) -> int:
     of.add_argument("--include-others", action="store_true", help="também os dos restantes jogadores (milhares; o dump oficial seguinte já os traz)")
     of.add_argument("--limit", type=int, default=None)
     of.add_argument("--no-categorize", action="store_true")
+    rk = msub.add_parser("rankings", help="guarda o ranking de pp do dia (Portugal inteiro + top 10 000 global) em data/processed/rankings/ (~400 pedidos ao mirror, retomável)")
+    rk.add_argument("--scope", choices=["PT", "global", "all"], default="all")
+    bk = msub.add_parser("db-backup", help="cópia de segurança da base de dados + data/control para o S3 privado (backups/db/<label>/)")
+    bk.add_argument("--label", default="weekly", help="weekly (guarda as 8 últimas) ou retrain-<dump> (todas)")
     gr = msub.add_parser("goal-refresh", help="atualiza a meta do top 100 do país (1 pedido ao mirror, no máximo 1× por semana)")
     gr.add_argument("--force", action="store_true", help="ignora o mínimo de 6 dias desde a última medição")
     pc = msub.add_parser("pack-check", help="decide se o pacote do S3 está desatualizado; com --upload reconstrói e envia (bucket privado)")
