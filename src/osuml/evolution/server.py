@@ -100,7 +100,7 @@ function render(s){
  if(TAB==="hoje")tabHoje(app,s);else if(TAB==="semana")tabSemana(app,s);else if(TAB==="perfil")tabPerfil(app,s);else if(TAB==="progresso")tabProgresso(app,s);else if(TAB==="rival")tabRival(app,s);else tabAvisos(app,s)}
 function tabAvisos(app,s){const c=$("div","card span2");c.appendChild($("h2","","Avisos"));const it=(s.notifications||{}).items||[];
  if(!it.length)c.appendChild($("div","sub","Sem avisos."));it.forEach(i=>{const d=$("div","nt"+(i.read?"":" unread"));d.append($("b","",i.title),$("div","sub",i.body),$("div","note",i.at.replace("T"," ")+(i.pushed?" · enviado ao telemóvel":"")));c.appendChild(d)});app.appendChild(c)}
-function nextSession(w){return w.sessions.find(x=>x.progress.done<x.progress.total)||null}
+function nextSession(w){const inc=x=>x.progress.done<x.progress.total;return w.sessions.find(x=>x.key!=="D"&&inc(x))||w.sessions.find(inc)||null}
 function weekDots(c){const wk=$("div","week"),mon=new Date(c.weeks[c.weeks.length-1].week+"T00:00:00");const todayIso=new Date().toISOString().slice(0,10);
  ["S","T","Q","Q","S","S","D"].forEach((l,k)=>{const d=new Date(mon);d.setDate(d.getDate()+k);const iso=d.toISOString().slice(0,10);
   const e=$("div","d"+(c.this_week.includes(iso)?" on":"")+(iso===todayIso?" today":""));e.append($("i"),$("span","",l));wk.appendChild(e)});return wk}
@@ -111,8 +111,8 @@ function tabHoje(app,s){
  if(!w||w.status==="error"||w.status==="unavailable"){app.appendChild($("div","card sub",(w&&w.message)||"Plano da semana indisponível."));return}
  if(w.status==="building"){app.appendChild($("div","card sub","A preparar o plano da semana (alguns segundos)…"));setTimeout(load,6000);return}
  const S=nextSession(w),sc=$("div","card hero");
- if(!S){sc.appendChild($("h2","","Plano da semana"));sc.appendChild($("div","sub","Todas as sessões estão concluídas. Boa semana!"))}
- else{sc.appendChild($("h2","","A seguir"));const h=$("div","row");h.append($("h3","",`Sessão ${S.key} · ${S.title}`),$("span","tag",`${S.progress.done}/${S.progress.total} · ${S.minutes} min`));sc.appendChild(h);
+ if(!S){sc.appendChild($("h2","","Plano da semana"));sc.appendChild($("div","sub",w.extending?"Sessões concluídas! A preparar uma nova ronda com mapas novos…":"Todas as sessões estão concluídas. Boa semana!"));if(w.extending)setTimeout(load,6000)}
+ else{sc.appendChild($("h2","","A seguir"));const h=$("div","row");h.append($("h3","",`Sessão ${S.key}${S.round>1?" (ronda "+S.round+")":""} · ${S.title}`),$("span","tag",`${S.progress.done}/${S.progress.total} · ${S.minutes} min`));sc.appendChild(h);
   sc.appendChild($("div","sub",S.goal));const wu=S.blocks.find(b=>b.name==="Aquecimento");if(wu)sc.appendChild($("div","note","Aquecimento: "+wu.what));
   if(!S.maps.length)sc.appendChild($("div","note",S.note||"Sem mapas dentro dos teus limites."));S.maps.forEach(m=>sc.appendChild(planRow(m,false,"sessão "+S.key)));
   const ul=$("ul","rules");S.rules.slice(0,3).forEach(r=>ul.appendChild($("li","",r)));sc.appendChild(ul)}
@@ -238,7 +238,7 @@ function tabSemana(app,s){
  w.sessions.forEach(S=>{
   const d=document.createElement("details");d.className="sess";if(cur&&cur.key===S.key)d.open=true;
   const sm=document.createElement("summary"),done=S.progress.done>=S.progress.total&&S.progress.total>0;
-  sm.append($("h3","",`${done?"✓ ":""}Sessão ${S.key} · ${S.title}`),$("span","tag",`${S.progress.done}/${S.progress.total} · ${S.minutes} min`));d.appendChild(sm);
+  sm.append($("h3","",`${done?"✓ ":""}Sessão ${S.key}${S.round>1?" (ronda "+S.round+")":""} · ${S.title}`),$("span","tag",`${S.progress.done}/${S.progress.total} · ${S.minutes} min`));d.appendChild(sm);
   d.appendChild($("div","sub",S.goal));
   S.blocks.forEach(b=>{const e=$("div","blk");e.appendChild($("b","",`${b.name} (${b.minutes} min): `));e.appendChild(document.createTextNode(b.what));d.appendChild(e);
    if(b.maps&&b.maps.length&&b.name==="Aquecimento")b.maps.forEach(m=>d.appendChild(planRow({...m,status:null},false,null)))});

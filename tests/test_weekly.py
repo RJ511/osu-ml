@@ -176,3 +176,43 @@ def test_pick_styled_takes_distinct_growth_styles_first_then_comfort():
     assert len(growth) == 3 and len({"streams" if i in (21, 22) else "tech" if i == 23 else "alt" for i in growth}) == 3  # 3 estilos distintos
     assert all(i <= 20 or i in (26, 27, 28, 29, 30) or i in growth for i in ids) and 25 not in ids  # flow com peso < 0,5 não conta como estilo claro
     assert wk._pick_styled([{"beatmap_id": 99, "dominant": "aim"}], {"maps": {}, "profile": prof}, n=5)[0]["beatmap_id"] == 99  # sem tags: cai para a diversidade por eixo
+
+
+def _complete(plan, plays, keys=("A", "B", "C")):
+    """Marca como jogados (com plays fictícias) os mapas das sessões `keys` da última ronda e devolve o plano avaliado."""
+    out = []
+    for s in plan["sessions"]:
+        if s["key"] in keys:
+            out += [play(m["beatmap_id"], 0, 0.9, stars=m["stars"], mods=m.get("mods") or "") for m in s["maps"]]
+    return wk.evaluate(plan, plays + out)
+
+
+def test_round_extends_with_new_maps_when_a_b_c_are_done_and_d_is_optional():
+    rec, plays, stats, plan = _plan_for_reject()
+    assert wk.rounds_done(wk.evaluate(plan, plays)) is False
+    done = _complete(plan, plays)
+    assert wk.rounds_done(done) is True  # D por jogar não trava
+    before = wk._plan_ids(plan)
+    assert wk.extend_round(rec, 7, plan, plays, set(), None) is True
+    keys = [(s["key"], s.get("round", 1)) for s in plan["sessions"]]
+    assert ("A", 2) in keys and ("C", 2) in keys and ("D", 2) not in keys
+    new_ids = {m["beatmap_id"] for s in plan["sessions"] if s.get("round") == 2 for m in s["maps"]}
+    assert new_ids and not (new_ids & before)  # mapas novos, nenhum repetido nesta semana
+
+
+def test_session_scale_and_style_pick_with_rival_guides_growth_styles():
+    assert wk._scale({"session_minutes": 30}) == 1.5 and wk._scale({}) == 1.0 and wk._scale({"session_minutes": 90}) == 2.0 and wk._scale({"session_minutes": "x"}) == 1.0
+    rec, plays, stats, plan = _plan_for_reject()
+    big, _ = wk._build_sessions(rec, 7, plays, [5.8, 6.5], stats, 10.1, set(), None, set(), scale=1.5)
+    assert big[2]["minutes"] == 30 and len(big[2]["maps"]) == 8 and len(big[1]["maps"]) == 2 and len(big[0]["maps"]) <= 5
+    cands = [{"beatmap_id": i, "dominant": "aim"} for i in range(1, 41)]
+    maps = {**{i: {"jumps": 1.0} for i in range(1, 21)}, **{i: {"streams": 1.0} for i in (21, 22)}, **{i: {"tech": 1.0} for i in (23, 24)},
+            25: {"alt": 1.0}, 26: {"stamina": 1.0}}
+    z = {"jumps": 0.6, "streams": -0.5, "tech": -0.2, "alt": -0.5, "flow": -0.55, "stamina": -0.6}
+    me = {"primary": "jumps", "z": z, "share": {"jumps": 0.68, "streams": 0.15, "tech": 0.08, "alt": 0.02, "flow": 0.03, "stamina": 0.02}}
+    rv = {"share": {"jumps": 0.55, "streams": 0.15, "tech": 0.15, "alt": 0.05, "flow": 0.03, "stamina": 0.02}}
+    pick = wk._pick_styled(cands, {"maps": maps, "profile": me, "rival": rv}, n=5, growth=3, rot=0)
+    dom_of = lambda i: next(iter(maps[i])) if i in maps else None  # noqa: E731
+    styles_picked = [dom_of(c["beatmap_id"]) for c in pick if dom_of(c["beatmap_id"]) != "jumps"]
+    assert styles_picked[0] == "tech"  # o rival joga mais tech do que tu: é o 1.º estilo de crescimento
+    assert len(set(styles_picked)) == len(styles_picked) == 3

@@ -196,6 +196,9 @@ class WeeklyPlanner:
         if f.exists():
             plan = json.loads(f.read_text(encoding="utf-8"))
             out.update(status="ready", **evaluate(plan, plays))
+            if self.rec is not None and rounds_done(out):  # terminou tudo: nunca fica parado, nasce uma nova ronda com mapas novos
+                self._extend_async(uid, wid, plays, goal, rejected, style_ctx)
+                out["extending"] = True
             return out
         if self.rec is None:
             out["message"] = "recomendador indisponível: sem plano"
@@ -209,6 +212,33 @@ class WeeklyPlanner:
                 threading.Thread(target=self._build_thread, args=(uid, plays, goal, today, band, stats, rejected, style_ctx), name="weekly-plan", daemon=True).start()
         out["status"] = "building"
         return out
+
+    def _extend_async(self, uid: int, wid: str, plays, goal, rejected, style_ctx) -> None:
+        key = f"{wid}#ext"
+        with self._lock:
+            if key in self._building:
+                return
+            self._building.add(key)
+
+        def run() -> None:
+            try:
+                f = self._plan_file(uid, wid)
+                with self._lock:
+                    plan = json.loads(f.read_text(encoding="utf-8"))
+                if extend_round(self.rec, uid, plan, plays, set(rejected or ()), style_ctx, goal):
+                    with self._lock:
+                        cur = json.loads(f.read_text(encoding="utf-8"))
+                        if max(x.get("round", 1) for x in cur["sessions"]) < max(x.get("round", 1) for x in plan["sessions"]):  # ninguém acrescentou entretanto
+                            tmp = f.with_suffix(".tmp")
+                            tmp.write_text(json.dumps(plan, ensure_ascii=False, default=str), encoding="utf-8")
+                            tmp.replace(f)
+            except Exception as exc:  # noqa: BLE001 - extra: nunca deita a página abaixo
+                self._errors[f"{wid}#ext"] = f"{type(exc).__name__}: {exc}"[:200]
+            finally:
+                with self._lock:
+                    self._building.discard(key)
+
+        threading.Thread(target=run, name="weekly-round", daemon=True).start()
 
     def reject(self, uid: int, beatmap_id: int, plays: list[dict[str, Any]], rejected: set[int], today: date) -> dict[str, Any]:
         """"Não serve": troca o mapa no plano guardado desta semana (se ainda por jogar) e grava o plano."""
@@ -242,7 +272,7 @@ class WeeklyPlanner:
     def _build_thread(self, uid, plays, goal, today, band, stats, rejected=None, style_ctx=None) -> None:
         wid = week_id(today)
         try:
-            plan = build_plan(self.rec, uid, plays, today, band, stats, rejected, style_ctx)
+            plan = build_plan(self.rec, uid, plays, today, band, stats, rejected, style_ctx, goal)
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = self._plan_file(uid, wid).with_suffix(".tmp")
             tmp.write_text(json.dumps(plan, ensure_ascii=False, default=str), encoding="utf-8")
@@ -301,12 +331,14 @@ def _dt_candidates(rec: Any, uid: int, ar_cap: float, skip: set[int]) -> tuple[l
     return [c for c in cands if c["ar"] >= 9.4 and c["beatmap_id"] not in skip], lim
 
 
-def _pick_styled(cands: list[dict[str, Any]], style_ctx: dict[str, Any], n: int = 5, growth: int = 3) -> list[dict[str, Any]]:
-    """Sessão C com estilos: até `growth` mapas de estilos DISTINTOS que o jogador joga menos (por ordem do z mais baixo), o resto em estilos
-    de conforto, diversificado por eixo. Só usa mapas com estilo dominante claro (peso ≥ 0,5) nos estilos de classe."""
-    from .styles import CLASS_STYLES
+def _pick_styled(cands: list[dict[str, Any]], style_ctx: dict[str, Any], n: int = 5, growth: int = 3, rot: int = 0) -> list[dict[str, Any]]:
+    """Sessão C com estilos: até `growth` mapas de estilos DISTINTOS (o resto em estilos de conforto, diversificado por eixo). Os estilos de
+    crescimento vêm, se houver rival, primeiro do que **o rival joga mais do que tu** (maior diferença de quota, a começar por uma posição que roda
+    com `rot` — semana/ronda — para variar), e o último lugar fica para o estilo que **tu** jogas menos (menor z). Sem rival, só o teu z mais baixo.
+    Só usa mapas com estilo dominante claro (peso ≥ 0,5) nos estilos de classe."""
+    from .styles import CLASS_STYLES, MIN_SHARE_CLASS
 
-    maps, prof = style_ctx["maps"], style_ctx["profile"]
+    maps, prof, rival = style_ctx["maps"], style_ctx["profile"], style_ctx.get("rival")
 
     def dom(c: dict[str, Any]) -> str | None:
         w = {k: v for k, v in (maps.get(c["beatmap_id"]) or {}).items() if k in CLASS_STYLES}
@@ -321,56 +353,116 @@ def _pick_styled(cands: list[dict[str, Any]], style_ctx: dict[str, Any], n: int 
         if d:
             by.setdefault(d, []).append(c)
     primary = prof.get("primary")
-    order = [k for k in sorted(by, key=lambda k: prof["z"].get(k, 0.0)) if k != primary]  # os menos jogados primeiro
-    picked: list[dict[str, Any]] = []
-    for k in order:
-        if len(picked) >= growth:
+    own = [k for k in sorted(by, key=lambda k: prof["z"].get(k, 0.0)) if k != primary]  # os que menos jogas primeiro
+    styles_pick: list[str] = []
+    if rival:
+        gaps = sorted(((rival["share"][k] - prof["share"][k], k) for k in CLASS_STYLES if k in by and k != primary and rival["share"][k] >= MIN_SHARE_CLASS), reverse=True)
+        ahead = [k for g, k in gaps if g > 0]
+        if ahead:
+            r = rot % len(ahead)
+            ahead = ahead[r:] + ahead[:r]
+        styles_pick = ahead[:max(growth - 1, 0)]
+    for k in own:  # completa com o que tu jogas menos
+        if len(styles_pick) >= growth:
             break
-        picked.append(by[k][0])
+        if k not in styles_pick:
+            styles_pick.append(k)
+    picked = [by[k][0] for k in styles_pick[:growth]]
     rest = [c for c in cands if c not in picked and dom(c) in (None, primary)]
     picked += _pick_diverse(rest, n - len(picked))
     return picked[:n]
 
 
+def _scale(goal: dict[str, Any] | None) -> float:
+    """Fator de tamanho da sessão: `goal.json: session_minutes` (20 = padrão; máx. 40)."""
+    try:
+        return min(max(float((goal or {}).get("session_minutes") or 20) / 20.0, 1.0), 2.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _build_sessions(rec: Any, uid: int, plays: list[dict[str, Any]], band: list[float], stats: dict[str, Any], ar_cap: float, rej: set[int],
+                    style_ctx: dict[str, Any] | None, used: set[int], scale: float = 1.0, rot: int = 0, round_no: int = 1) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """As 4 sessões (A consolidar, B esticar, C variedade, D DT) sem repetir mapas de `used` nem rejeitados. Cada ronda nova usa mapas diferentes."""
+    skip = set(rej) | set(used)
+    s90, s_max = stats["s90"], stats["s_max"]
+    ask = lambda lo, hi, n, **kw: [c for c in rec.band_candidates(uid, lo, hi, max_ar=ar_cap, n=n + len(skip), **kw) if c["beatmap_id"] not in skip]  # noqa: E731
+    n_a, n_c, n_d = min(round(3 * scale), 5), min(round(5 * scale), 8), min(round(3 * scale), 4)
+    minutes = int(round(20 * scale / 5) * 5)
+    best = _best_nomod(plays)
+    consolidate = _consolidate(best, s90, skip)[:n_a]
+    warm = sorted((p for p in best.values() if p["accuracy"] >= 0.97 and _stars(p) <= s90 - 0.8 and p["beatmap_id"] not in rej), key=lambda p: -p["accuracy"])[:2]
+    n_b = 1 if scale < 1.5 else 2
+    stretch = ask(s_max + 0.1, s_max + 0.8, n_b + 1, mods="", min_p=0.2, order="p")[:n_b + 1]
+    if style_ctx:  # com tags: pede-se uma lista larga (os mapas de outros estilos são raros entre os mais prováveis)
+        wide = ask(s90 - 0.3, s90 + 0.3, 5000, mods="", min_p=0.5, order="p")
+        variety = _pick_styled(wide, style_ctx, n=n_c, growth=min(3 + (1 if scale >= 1.5 else 0), n_c), rot=rot)
+    else:
+        variety = _pick_diverse(ask(s90 - 0.3, s90 + 0.3, 60, mods="", min_p=0.6, order="p"), n_c)
+    dt_all, dt_lim = _dt_candidates(rec, uid, ar_cap, skip)
+    dt = dt_all[:n_d]
+    sessions = [
+        {"key": "A", **BLOCKS["A"], "minutes": minutes, "maps": [_mine(p, best_acc=p["accuracy"], target=round(min(p["accuracy"] + 0.015, 0.99), 3)) for p in consolidate]},
+        {"key": "B", **BLOCKS["B"], "minutes": minutes, "maps": [_clean(c) for c in stretch[:n_b]], "alternative": [_clean(c) for c in stretch[n_b:n_b + 1]]},
+        {"key": "C", **BLOCKS["C"], "minutes": minutes, "maps": [_clean(c, dominant=c["dominant"]) for c in variety]},
+        {"key": "D", **BLOCKS["D"], "minutes": minutes, "maps": [_clean(c) for c in dt],
+         "note": f"tecto DT: {dt_lim.get('stars_ceiling')}★, AR até {ar_cap}" if dt else "sem mapas DT dentro dos teus limites esta semana"},
+    ]
+    if round_no > 1:  # o DT é 1× por semana: as rondas extra só repetem A, B e C
+        sessions = [x for x in sessions if x["key"] != "D"]
+    for sess in sessions:
+        sess["round"] = round_no
+        sess["blocks"] = [{**WARMUP, "maps": [_mine(p, best_acc=p["accuracy"]) for p in warm]} if sess["key"] != "D"
+                          else {**WARMUP, "what": "2 mapas de ~4★ em DT, sem procurar score: habitua a mão à velocidade.", "maps": []},
+                          {"name": "Bloco principal", "minutes": sess["minutes"] - WARMUP["minutes"] - CLOSING["minutes"], "what": sess["goal"], "maps": []}, CLOSING]
+    return sessions, dt_lim
+
+
 def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, band: list[float], stats: dict[str, Any],
-               rejected: set[int] | None = None, style_ctx: dict[str, Any] | None = None) -> dict[str, Any]:
+               rejected: set[int] | None = None, style_ctx: dict[str, Any] | None = None, goal: dict[str, Any] | None = None) -> dict[str, Any]:
     """Monta o teste e as sessões desta semana com o recomendador (só leitura local). `rejected` = mapas a que disseste "Não serve" (nunca entram)."""
     rej = set(rejected or ())
     ws = week_monday(today)
     limits = rec._limits(uid, "") or {}
     ar_cap = limits.get("ar_cap") or 10.1
-    s90, s_max = stats["s90"], stats["s_max"]
     seed = int(ws.strftime("%Y%m%d")) + int(uid)
-    ask = lambda lo, hi, n, **kw: [c for c in rec.band_candidates(uid, lo, hi, max_ar=ar_cap, n=n + len(rej), **kw) if c["beatmap_id"] not in rej]  # noqa: E731
-    test = ask(band[0], band[1], TEST_MAPS, mods="", min_p=0.35, order="random", seed=seed)[:TEST_MAPS]
+    test = [c for c in rec.band_candidates(uid, band[0], band[1], mods="", min_p=0.35, max_ar=ar_cap, n=TEST_MAPS + len(rej), order="random", seed=seed)
+            if c["beatmap_id"] not in rej][:TEST_MAPS]
     taken = {m["beatmap_id"] for m in test}
-    clean, mine = _clean, _mine
-    best = _best_nomod(plays)  # as tuas próprias jogadas sem mods: melhor accuracy por mapa
-    consolidate = _consolidate(best, s90, rej)[:3]
-    warm = sorted((p for p in best.values() if p["accuracy"] >= 0.97 and _stars(p) <= s90 - 0.8 and p["beatmap_id"] not in rej), key=lambda p: -p["accuracy"])[:2]
-    stretch = ask(s_max + 0.1, s_max + 0.8, 2, mods="", min_p=0.2, order="p")[:2]
-    if style_ctx:  # com tags: pede-se uma lista larga (os mapas de outros estilos são raros entre os mais prováveis)
-        wide = [c for c in ask(s90 - 0.3, s90 + 0.3, 5000, mods="", min_p=0.5, order="p") if c["beatmap_id"] not in taken]
-        variety = _pick_styled(wide, style_ctx)
-    else:
-        variety = _pick_diverse([c for c in ask(s90 - 0.3, s90 + 0.3, 60, mods="", min_p=0.6, order="p") if c["beatmap_id"] not in taken], 5)
-    dt_all, dt_lim = _dt_candidates(rec, uid, ar_cap, rej)
-    dt = dt_all[:3]
-
-    sessions = [
-        {"key": "A", **BLOCKS["A"], "maps": [mine(p, best_acc=p["accuracy"], target=round(min(p["accuracy"] + 0.015, 0.99), 3)) for p in consolidate]},
-        {"key": "B", **BLOCKS["B"], "maps": [clean(c) for c in stretch[:1]], "alternative": [clean(c) for c in stretch[1:2]]},
-        {"key": "C", **BLOCKS["C"], "maps": [clean(c, dominant=c["dominant"]) for c in variety]},
-        {"key": "D", **BLOCKS["D"], "maps": [clean(c) for c in dt], "note": f"tecto DT: {dt_lim.get('stars_ceiling')}★, AR até {ar_cap}" if dt else "sem mapas DT dentro dos teus limites esta semana"},
-    ]
-    for s in sessions:
-        s["blocks"] = [{**WARMUP, "maps": [mine(p, best_acc=p["accuracy"]) for p in warm]} if s["key"] != "D" else {**WARMUP, "what": "2 mapas de ~4★ em DT, sem procurar score: habitua a mão à velocidade.", "maps": []},
-                       {"name": "Bloco principal", "minutes": s["minutes"] - WARMUP["minutes"] - CLOSING["minutes"], "what": s["goal"], "maps": []}, CLOSING]
+    sessions, dt_lim = _build_sessions(rec, uid, plays, band, stats, ar_cap, rej, style_ctx, taken, _scale(goal), rot=ws.isocalendar()[1], round_no=1)
     return {"week": week_id(today), "week_start": ws.isoformat(), "created_at": datetime.now().isoformat(), "stats": stats,
             "limits": {"ar_cap": ar_cap, "stars_ceiling_nomod": limits.get("stars_ceiling"), "stars_ceiling_dt": dt_lim.get("stars_ceiling")},
-            "test": {"band": band, "maps": [clean(c) for c in test],
+            "test": {"band": band, "maps": [_clean(c) for c in test],
                      "how": "Joga cada mapa pela 1.ª vez, sem mods. Só a 1.ª jogada conta (accuracy e se passaste); depois podes repetir à vontade."},
             "sessions": sessions}
+
+
+MAX_ROUNDS = 4
+
+
+def rounds_done(plan: dict[str, Any]) -> bool:
+    """A, B e C da última ronda completas (o D, DT 1×/semana, é opcional e não trava a ronda seguinte)."""
+    last = max((s.get("round", 1) for s in plan["sessions"]), default=1)
+    cur = [s for s in plan["sessions"] if s.get("round", 1) == last and s["key"] != "D"]
+    return bool(cur) and all(s["progress"]["total"] == 0 or s["progress"]["done"] >= s["progress"]["total"] for s in cur)
+
+
+def extend_round(rec: Any, uid: int, plan: dict[str, Any], plays: list[dict[str, Any]], rejected: set[int], style_ctx: dict[str, Any] | None,
+                 goal: dict[str, Any] | None = None) -> bool:
+    """Acrescenta ao plano uma nova ronda (A, B, C, D outra vez) com mapas ainda não usados nesta semana. Devolve False se já há `MAX_ROUNDS`
+    ou se a nova ronda não tiver nenhum mapa."""
+    last = max((s.get("round", 1) for s in plan["sessions"]), default=1)
+    if last >= MAX_ROUNDS:
+        return False
+    used = _plan_ids(plan)
+    ar_cap = (plan.get("limits") or {}).get("ar_cap") or 10.1
+    sessions, _ = _build_sessions(rec, uid, plays, plan["test"]["band"], plan["stats"], ar_cap, set(rejected), style_ctx, used, _scale(goal),
+                                  rot=date.fromisoformat(plan["week_start"]).isocalendar()[1] + last, round_no=last + 1)
+    sessions = [x for x in sessions if x["maps"]]
+    if not sessions:
+        return False
+    plan["sessions"].extend(sessions)
+    return True
 
 
 def _plan_ids(plan: dict[str, Any]) -> set[int]:

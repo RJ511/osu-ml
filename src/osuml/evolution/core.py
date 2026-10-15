@@ -357,7 +357,8 @@ class Evolution:
             rej = {b for b, v in self._verdicts(uid).items() if v == "nao_serve"}
             sd = self.styles()
             prof = (sd["build"].get("players") or {}).get(uid)
-            ctx = {"maps": sd["maps"], "profile": prof} if prof else None
+            rv = (self._rival_state().get("current") or {}).get("user_id")
+            ctx = {"maps": sd["maps"], "profile": prof, "rival": (sd["build"].get("players") or {}).get(rv) if rv else None} if prof else None
             return self._with_verdicts(self.weekly.state(uid, plays, goal, today, rejected=rej, style_ctx=ctx), uid)
         except Exception as exc:  # a semana de treino é um extra: nunca pode deitar a página abaixo
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"[:200]}
