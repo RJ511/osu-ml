@@ -1,7 +1,7 @@
 """Leitura em streaming dos dumps SQL do data.ppy.sh (formato mysqldump), sem MySQL.
 
 Fonte: `data/external/performance/*.tar.bz2` (dumps oficiais de performance; licença: só análise
-estatística, nada público/produção sem autorização do ppy — ver CLAUDE.md).
+estatística, nada público/produção sem autorização do ppy — ver docs/ref/01_dados_e_recolha.md).
 
 Só lê `INSERT INTO ... VALUES (...),(...);` e devolve tuplos Python (int/float/str/None).
 Não interpreta esquemas: as colunas vêm de `columns()`, lido do `CREATE TABLE`.

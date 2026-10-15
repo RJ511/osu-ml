@@ -87,6 +87,6 @@ Se o passo 7 recusar, **não é falha do pod**: o pod já está parado; regista 
 1. `.venv/Scripts/python.exe -m pytest -q` (têm de passar; se algum falhar por causa do modelo novo, reverte: renomeia `models_prev_*`/`index_prev_*` de volta e regista).
 2. `.venv/Scripts/python.exe -m osuml maintenance pack-check --upload` (o pacote do S3 fica com o modelo novo; o índice/modelo mudaram, por isso é "pertinente").
 3. Reinicia o painel 8765 para carregar o modelo novo (mata o processo que escuta na porta — pode haver mais de um; relança `python -m osuml panel --port 8765` em segundo plano).
-4. Atualiza `CLAUDE.md` (secção do treino: snapshot, AUC, MAE, custo real do pod, tempo) e escreve `data/reports/manutencao/retreino_AAAA_MM_DD.txt` com: métricas antigas/novas, calibração (refeita ou mantida),
+4. Atualiza `docs/ref/04_modelos_e_recomendador.md` (secção do treino: snapshot, AUC, MAE, custo real do pod, tempo) e escreve `data/reports/manutencao/retreino_AAAA_MM_DD.txt` com: métricas antigas/novas, calibração (refeita ou mantida),
    pares da API usados, custo estimado (horas de pod × 0,736 $), chave do pacote no S3.
 5. Apaga `retrain_running.json`. Resume ao utilizador em português de Portugal, em 5–8 linhas: o que mudou, custo, se o pod ficou parado (id), e o que ficou pendente.

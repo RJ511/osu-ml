@@ -9,7 +9,7 @@ Cobre, por mapa, o nomod e cada combinação de mods (`mods_effective`, sem
 Isto é uma **baseline local, não ground truth**: replica o algoritmo de pp
 via uma biblioteca de terceiros, para deixar de depender do
 `nomod_star_rating` embutido na resposta da API (que já sabemos que
-subestima scores com DT, ver CLAUDE.md).
+subestima scores com DT, ver docs/ref/01_dados_e_recolha.md).
 
 Só existem, para osu!standard, três "skills" formais: `aim`, `speed` e
 `flashlight` (fica 0.0 sem o mod FL). Termos de comunidade como stream,

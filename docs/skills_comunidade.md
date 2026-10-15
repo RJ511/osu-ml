@@ -1,6 +1,6 @@
 # Nomenclatura de skills da comunidade — perguntas e proposta de cálculo
 
-Documento de discussão (passo 4→5→6 do `CLAUDE.md`). **Não implementa nada** — é a lista de
+Documento de discussão (passo 4→5→6 dos "Próximos passos" em `docs/ref/01_dados_e_recolha.md`). **Não implementa nada** — é a lista de
 decisões que faltam tomar antes de traduzir a decomposição formal do jogo (`aim`, `speed`,
 `flashlight`, já calculados em `difficulty.py`) para os termos que a comunidade usa (stream, jump,
 stamina, reading, tech, ...). Cada pergunta vem com um comentário que propõe **exatamente** como
@@ -427,5 +427,5 @@ set/2026), a mediana de Reading sobe muito (42,0 → 62,1), mais do que os outro
 correlações cruzadas entre eixos — Speed e Reading correlacionam a 0,59, não são totalmente
 independentes nesta primeira versão).
 
-Próximo passo: passo 5 do `CLAUDE.md` (features de hit objects mais finas: distância, ângulo,
+Próximo passo: passo 5 dos "Próximos passos" (`docs/ref/01_dados_e_recolha.md`) (features de hit objects mais finas: distância, ângulo,
 sliders) e, mais tarde, formalizar a "leitura do jogador" como relatório reutilizável se for útil.

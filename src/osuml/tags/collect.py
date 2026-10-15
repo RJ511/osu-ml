@@ -1,7 +1,7 @@
 """Recolha das tags votadas dos mapas (lazer) a partir do mirror hinai: 1 pedido por SET (todas as dificuldades).
 
 `GET /v3/osu/beatmaps/s/{set_id}` (omissão, local) ou `.../details` → `beatmaps[].top_tag_ids = [{tag_id, count}]`; o `/details` coincide com a osu!API, o local é uma gravação com ~80 % dos votos.
-0 pedidos à osu!API. Boa conduta (docs do mirror, lidas em 2026-10-14; ver CLAUDE.md):
+0 pedidos à osu!API. Boa conduta (docs do mirror, lidas em 2026-10-14; ver docs/ref/07_mirror_tags_rankings.md):
 - só sets ranked/loved/approved (respondidos localmente pelo mirror; os outros gastam a quota partilhada deles na osu!API);
 - ritmo ≥ `MIN_INTERVAL_S` entre pedidos (e mais devagar se o mirror demorar), teto por execução;
 - consulta `GET /api/v1/hinai/guard` antes de começar e a cada `GUARD_CHECK_EVERY` pedidos; se houver pressão, espera
