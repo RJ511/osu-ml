@@ -34,6 +34,8 @@ a{color:var(--acc)}.tag{border:1px solid var(--line);border-radius:5px;padding:1
  <div class="row"><input id="arcap" type="number" step="0.1" min="7" max="11.5" placeholder="AR máx. (auto)" style="width:120px" title="AR efetivo máximo; vazio = o teu máximo já passado + 0,3">
   <select id="focus" title="equilibrado = um pouco de ganho de pp; só skill = como antes; pp = prioriza os mapas que mais sobem os pp totais (inclui o nível ambicioso)">
   <option value="equilibrado">Foco: equilibrado</option><option value="skill">Foco: só skill</option><option value="pp">Foco: pp</option></select>
+  <select id="tagstyle" title="tipo de mapa segundo as tags votadas: conforto = estilo em que és forte/que jogas muito; crescimento = estilo fraco ou pouco jogado. Só aparecem mapas com tags (~10 % do catálogo)">
+  <option value="">Tipo de mapa: todos</option><option value="conforto">Só conforto</option><option value="crescimento">Só crescimento</option><option value="jumps">Jumps</option><option value="streams">Streams</option><option value="tech">Tech</option><option value="flow">Flow aim</option><option value="alt">Alternado</option><option value="stamina">Stamina</option><option value="reading">Leitura</option><option value="precision">Precisão</option></select>
   <button class="go" id="go">Recomendar</button><span class="sub" id="msg"></span></div>
 </div>
 <div id="out"></div>
@@ -78,13 +80,13 @@ $("go").onclick=async()=>{
  const name=$("player").value.trim();if(!name){$("msg").textContent="escreve o nome de um jogador";return}
  if(!sel.size){$("msg").textContent="escolhe pelo menos uma skill";return}
  $("go").disabled=true;$("msg").textContent="a calcular…";$("out").replaceChildren();
- let r;try{r=await post("/api/recommend",{player:name,skills:[...sel],focus:$("focus").value,mods:[...selM],ar_cap:$("arcap").value})}catch(e){r={error:"sem ligação ao servidor"}}
+ let r;try{r=await post("/api/recommend",{player:name,skills:[...sel],focus:$("focus").value,mods:[...selM],ar_cap:$("arcap").value,tagstyle:$("tagstyle").value})}catch(e){r={error:"sem ligação ao servidor"}}
  $("go").disabled=false;if(r.error){$("msg").textContent=r.error;$("msg").className="sub err";return}
  $("msg").className="sub";loadBlocks();$("msg").textContent=r.items.length+" sugestões para "+r.player.username+" · candidatos: "+r.counts.novo+" novos, "+r.counts.rejogar+" a repetir, "+r.counts.tentar_de_novo+" a tentar de novo · com P(passar) ≥ 80 %: "+r.counts.sugestoes_seguras;
  const lv=r.player.levels,card=el("div","card");
  card.appendChild(el("div","sub","O teu nível (P90 dos melhores passes; 50 = mapa mediano): "+["aim","speed","stamina","reading"].map(a=>a+" "+lv[a].toFixed(0)).join(" · ")));
  const wrap=el("div","tblwrap"),tb=el("table"),hd=el("tr");
- ["#","Mapa","Nível","Tipo","★","Desafio","P(passar)","Acc se passar","Acc atual","pp est.","pp / ganho","Estilo","Porquê","Feedback"].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
+ ["#","Mapa","Nível","Tipo","★","Desafio","P(passar)","Acc se passar","Acc atual","pp est.","pp / ganho","Estilo","Tags","Porquê","Feedback"].forEach(h=>hd.appendChild(el("th","",h)));tb.appendChild(hd);
  r.items.forEach((x,i)=>{const tr=el("tr");tr.appendChild(el("td","num",String(i+1)));
   const tm=el("td"),a=el("a","",x.label);a.href=x.url;a.target="_blank";a.rel="noopener noreferrer";tm.appendChild(a);tm.appendChild(el("div","sub","ID do mapa: "+x.beatmap_id+(x.beatmapset_id?" · set "+x.beatmapset_id:"")));tr.appendChild(tm);
   tr.appendChild(el("td","",x.tier));tr.appendChild(el("td","",KIND[x.kind]||x.kind));tr.appendChild(el("td","num",x.stars.toFixed(2)));
@@ -92,7 +94,7 @@ $("go").onclick=async()=>{
   tr.appendChild(el("td","num",Math.round(x.p_pass*100)+" %"));tr.appendChild(el("td","num",(x.acc_pass*100).toFixed(1)+" %"));
   tr.appendChild(el("td","num",x.acc_cur==null?"—":(x.acc_cur*100).toFixed(1)+" %"));tr.appendChild(el("td","num",x.pp_gain_pct==null?"—":"+"+Math.round(x.pp_gain_pct)+" %"));
   tr.appendChild(el("td","num",x.pp_est==null?"—":Math.round(x.pp_est)+" pp (+"+x.pp_gain.toFixed(1)+")"));
-  tr.appendChild(el("td","num",x.style_pct.toFixed(0)));tr.appendChild(el("td","why",x.why));
+  tr.appendChild(el("td","num",x.style_pct.toFixed(0)));tr.appendChild(el("td","",x.tagstyle?x.tagstyle.label+(x.tagstyle.role==="neutro"?"":" · "+x.tagstyle.role):"—"));tr.appendChild(el("td","why",x.why));
   const fb=el("td"),y=el("button","","Serve"),n=el("button","","Não serve");
   const send=async v=>{const res=await post("/api/feedback",{player:r.player.username,beatmap_id:x.beatmap_id,verdict:v,skills:r.skills,kind:x.kind,score:x.score});
    fb.replaceChildren(el("span",res.ok?"ok":"err",res.ok?(v==="serve"?"guardado: serve":"guardado: não serve"):(res.error||"erro")))};
@@ -126,7 +128,7 @@ def build_app(recommender: Any, port: int):
         except (TypeError, ValueError):
             ar_cap = None
         res = recommender.recommend_many(found[0], [str(s) for s in skills], n=20, focus=str(body.get("focus") or "equilibrado"),
-                                         mods_list=[str(m) for m in mods], ar_cap=ar_cap)
+                                         mods_list=[str(m) for m in mods], ar_cap=ar_cap, tagstyle=str(body.get("tagstyle") or ""))
         if "error" not in res:
             res["player"] = {**res["player"], "username": found[1]}
         return res

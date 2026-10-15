@@ -461,7 +461,7 @@ class Recommender:
 
     # ------------------------------------------------------------ recomendar
     def recommend(self, user_id: int, skills: list[str], n: int = 20, focus: str = DEFAULT_FOCUS, mods: str = "",
-                  ar_cap: float | None = None, _log: bool = True) -> dict[str, Any]:
+                  ar_cap: float | None = None, _log: bool = True, tagstyle: str = "") -> dict[str, Any]:
         import math
 
         import numpy as np
@@ -528,7 +528,11 @@ class Recommender:
         cand = (~passed_mask & (sel_delta >= MIN_DELTA_NEW) & (other_excess <= OTHER_AXIS_LIMIT)) | \
                (passed_mask & (sel_delta >= MIN_DELTA_REPLAY) & (other_excess <= OTHER_AXIS_LIMIT + 4))
         cand = cand & ~unavailable
-        key = (user_id, tuple(sorted(skills)), len(pdata.played) + pdata.n_passes, mods)
+        tctx = self._tag_ctx(user_id)
+        tag_note = None
+        if tagstyle:
+            cand, tag_note = self._tag_filter(cand, idx, tctx, tagstyle)
+        key = (user_id, tuple(sorted(skills)), len(pdata.played) + pdata.n_passes, mods, tagstyle)
         pr = self._cache.get(key)
         if pr is None:
             pr = self._predict_all(pdata, np.nonzero(cand)[0], x=idx["x"])
@@ -646,6 +650,7 @@ class Recommender:
                                  {"est": pp_est, "gain": pp_gain, "p": p_pass, "on": w_pp > 0})
                 it["tier"] = tier
                 it["mods"] = mods
+                it["tagstyle"] = self._tag_role(tctx, int(idx["ids"][j]))
                 if mods:
                     it["label"] += f" +{mods}"
                     it["why"] = f"com {mods}: " + it["why"]
@@ -680,7 +685,7 @@ class Recommender:
                            "adjust": None if not adj else {"acc_bias_pts": round(float(adj.get("acc_bias") or 0.0) * 100, 2), "pass_offset": adj.get("pass_offset"),
                                                            "n_acc": adj.get("n_acc"), "n_pass": adj.get("n_pass")},
                            "n_blocked": int(blocked_user.sum())},
-                "skills": skills, "items": items, "focus": focus, "mods": mods,
+                "skills": skills, "items": items, "focus": focus, "mods": mods, "tagstyle": tagstyle or None,
                 "limits": {**limits, "ar_cap_used": cap_used, "excluded_maps": n_over},
                 "mods_calibration": None if not mods_cal else {k: mods_cal.get(k) for k in ("n_attempts", "n_players", "auc_before", "auc_after", "pass", "acc_shift")},
                 "pp": {"active": w_pp > 0, "weight": w_pp, "total_pp_now": None if total_pp_now is None else round(total_pp_now, 1), **pp_pool_info,
@@ -688,7 +693,7 @@ class Recommender:
                                 "pp esperado vem do modelo do pp oficial à accuracy esperada") if w_pp > 0 else
                        ("foco em pp desligado" + ("" if focus == "skill" else ": falta o modelo do pp oficial (analyze pp-model) ou o catálogo"))},
                 "counts": {"ambiciosos": len(amb_items), "novo": int(new_ok.sum()), "tentar_de_novo": int(retry_ok.sum()), "rejogar": int(replay_ok.sum()), "sugestoes_seguras": n_safe},
-                "notes": [*pdata.notes, *notes_adj, "Atributos dos mapas sem mods; previsão com o perfil de forma atual do jogador (não a forma de hoje, nem mods).",
+                "notes": [*([tag_note] if tag_note else []), *pdata.notes, *notes_adj, "Atributos dos mapas sem mods; previsão com o perfil de forma atual do jogador (não a forma de hoje, nem mods).",
                           "Nível = P90 dos melhores passes; nota 50 = mapa mediano, +20 por desvio-padrão.",
                           f"Regra: P(passar) ≥ {min_safe * 100:.0f} % e accuracy esperada ao passar ≥ {MIN_EXPECTED_ACC * 100:.0f} % (ideal ~{TARGET_ACC * 100:.0f} %). "
                           f"'arriscado' = P(passar) entre {min_fb * 100:.0f} % e {min_safe * 100:.0f} %.",
@@ -696,6 +701,62 @@ class Recommender:
                              f"(AUC ~{(mods_cal.get('auc_before') or 0):.2f}), por isso 'seguro' = décimo melhor das previsões (≥ {min_safe * 100:.0f} %), não ≥ 80 %; accuracy pela vista "
                              f"{'nomod' if mods_cal.get('acc_source') == 'nomod' else 'DT'} com deslocamento {float(mods_cal.get('acc_shift') or 0) * 100:+.1f} pts. Previsões indicativas."]
                             if mods and mods_cal else [])]}
+
+    # ------------------------------------------------------------------ estilo por tags (evolution/styles.py)
+    def _tag_ctx(self, user_id: int) -> dict[str, Any] | None:
+        """Estilos dos mapas (tags votadas) + perfil de estilo do jogador, com cache de 10 min. None sem tags/BD (a funcionalidade fica desligada)."""
+        import time
+
+        now = time.time()
+        cached = getattr(self, "_tag_cache", None)
+        if cached is None or now - cached[0] > 600:
+            try:
+                from ..evolution import styles as S
+
+                data = {"maps": S.map_styles(self.store), "build": S.build(self.store)}
+            except Exception:  # noqa: BLE001 - extra: nunca impede uma recomendação
+                data = {"maps": {}, "build": {"ok": False, "players": {}}}
+            cached = (now, data)
+            self._tag_cache = cached
+        data = cached[1]
+        if not data["maps"]:
+            return None
+        return {"maps": data["maps"], "profile": (data["build"].get("players") or {}).get(user_id)}
+
+    @staticmethod
+    def _tag_role(tctx: dict[str, Any] | None, beatmap_id: int) -> dict[str, Any] | None:
+        if not tctx:
+            return None
+        from ..evolution.styles import map_role
+
+        return map_role(tctx["maps"].get(beatmap_id), tctx["profile"])
+
+    def _tag_filter(self, cand, idx, tctx, tagstyle: str):
+        """Restringe os candidatos pelo tipo de mapa segundo as tags: `conforto`/`crescimento` (papel para este jogador) e/ou estilos
+        (`jumps,streams,flow,alt,tech,stamina,reading,precision`; vários = qualquer um). Mapas sem tags ficam de fora (só ~10 % do catálogo tem tags)."""
+        import numpy as np
+
+        from ..evolution.styles import STYLES
+
+        tokens = [t.strip() for t in str(tagstyle).split(",") if t.strip()]
+        roles = {t for t in tokens if t in ("conforto", "crescimento")}
+        styles = {t for t in tokens if t in STYLES}
+        if not tokens or tctx is None or not (roles or styles):
+            return cand, "filtro por tipo de mapa ignorado: sem tags ou valor desconhecido"
+        if roles and tctx["profile"] is None and not styles:
+            return cand, "filtro conforto/crescimento ignorado: ainda sem perfil de estilo teu (poucos mapas com tags jogados)"
+        rows = np.nonzero(cand)[0]
+        keep = np.zeros(len(cand), dtype=bool)
+        tagged = 0
+        for j in rows:
+            r = self._tag_role(tctx, int(idx["ids"][j]))
+            if r is None:
+                continue
+            tagged += 1
+            if (r["role"] in roles) or (r["style"] in styles):
+                keep[j] = True
+        what = ", ".join(sorted(roles | {STYLES[x][0] for x in styles}))
+        return cand & keep, (f"Tipo de mapa ({what}): {int(keep.sum())} de {len(rows)} candidatos; só {tagged} têm tags (mapas sem tags ficam de fora).")
 
     def acc_needed(self, user_id: int, items: list[tuple[int, str]], thresholds: tuple[float, ...] = (1.0, 5.0)) -> dict[tuple[int, str], dict[str, Any] | None]:
         """Para cada (beatmap_id, mods): accuracy mínima (modelo do pp oficial, grelha de 0,25 pts) para os pp TOTAIS do jogador subirem ≥ cada limiar
@@ -787,15 +848,15 @@ class Recommender:
         return out
 
     def recommend_many(self, user_id: int, skills: list[str], n: int = 20, focus: str = DEFAULT_FOCUS, mods_list: list[str] | None = None,
-                       ar_cap: float | None = None) -> dict[str, Any]:
+                       ar_cap: float | None = None, tagstyle: str = "") -> dict[str, Any]:
         """Várias seleções de mods de uma vez (ex.: ["", "DT", "HD,DT"]): cada uma recomenda por si (limiares e limites próprios) e a lista final junta as melhores de cada,
         por pontuação, com cada sugestão marcada com os seus mods."""
         import math
 
         wanted = list(dict.fromkeys(mods_list if mods_list else [""]))
         if len(wanted) == 1:
-            return self.recommend(user_id, skills, n, focus, mods=wanted[0], ar_cap=ar_cap)
-        results = [(m, self.recommend(user_id, skills, n, focus, mods=m, ar_cap=ar_cap, _log=False)) for m in wanted]
+            return self.recommend(user_id, skills, n, focus, mods=wanted[0], ar_cap=ar_cap, tagstyle=tagstyle)
+        results = [(m, self.recommend(user_id, skills, n, focus, mods=m, ar_cap=ar_cap, _log=False, tagstyle=tagstyle)) for m in wanted]
         ok = [(m, r) for m, r in results if "error" not in r]
         if not ok:
             return results[0][1]

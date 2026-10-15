@@ -115,7 +115,7 @@ def test_recommend_many_merges_the_best_of_each_mods_selection_and_keeps_errors(
     rec = Recommender.__new__(Recommender)
     rec.log_predictions = False
 
-    def fake(user_id, skills, n=20, focus="equilibrado", mods="", ar_cap=None, _log=True):
+    def fake(user_id, skills, n=20, focus="equilibrado", mods="", ar_cap=None, _log=True, tagstyle=""):
         if mods == "HR":
             return {"error": "sem vista HR"}
         items = [{"beatmap_id": i, "score": 1.0 - i / 100 - (0.05 if mods else 0), "mods": mods} for i in range(1, 6)]
@@ -128,3 +128,28 @@ def test_recommend_many_merges_the_best_of_each_mods_selection_and_keeps_errors(
     assert out["errors"] == {"HR": "sem vista HR"} and set(out["by_mods"]) == {"NM", "DT"}
     only = rec.recommend_many(1, ["aim"], 3, mods_list=["HR"])
     assert only == {"error": "sem vista HR"}
+
+
+def test_tag_filter_keeps_only_tagged_candidates_of_the_wanted_role_or_style():
+    import numpy as np
+
+    from osuml.recommend.core import Recommender
+
+    rec = Recommender.__new__(Recommender)
+    maps = {1: {"jumps": 1.0}, 2: {"streams": 0.9, "jumps": 0.1}, 3: {"tech": 1.0}}  # 4 sem tags
+    prof = {"z": {"jumps": 1.0, "streams": -1.0, "tech": 0.0, "flow": 0, "alt": 0, "stamina": 0, "reading": 0, "precision": 0},
+            "performance": {k: {"acc_pts": None} for k in ("jumps", "streams", "tech", "flow", "alt", "stamina", "reading", "precision")}}
+    tctx = {"maps": maps, "profile": prof}
+    idx = {"ids": np.array([1, 2, 3, 4])}
+    cand = np.array([True, True, True, True])
+    out, note = rec._tag_filter(cand, idx, tctx, "crescimento")
+    assert list(out) == [False, True, False, False] and "1 de 4" in note and "só 3 têm tags" in note  # streams é o estilo fraco
+    out, _ = rec._tag_filter(cand, idx, tctx, "conforto")
+    assert list(out) == [True, False, False, False]
+    out, _ = rec._tag_filter(cand, idx, tctx, "tech,streams")  # vários estilos: qualquer um
+    assert list(out) == [False, True, True, False]
+    same, note = rec._tag_filter(cand, idx, None, "tech")  # sem tags: ignora o filtro e diz porquê
+    assert list(same) == [True] * 4 and "ignorado" in note
+    same, note = rec._tag_filter(cand, idx, {"maps": maps, "profile": None}, "crescimento")
+    assert list(same) == [True] * 4 and "perfil" in note
+    assert rec._tag_role(tctx, 3)["label"] == "Tech" and rec._tag_role(tctx, 99) is None and rec._tag_role(None, 1) is None
