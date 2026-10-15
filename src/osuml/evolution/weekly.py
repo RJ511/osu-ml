@@ -32,7 +32,7 @@ BLOCKS = {
           "rules": ["No máximo 5 tentativas no mesmo mapa; depois muda.", "A 1.ª tentativa é para ler o mapa: não procures accuracy.",
                     "Sucesso por degraus: passar → ≥ 90 % → ≥ 93 %."]},
     "C": {"title": "Variedade e leitura", "minutes": 20,
-          "goal": "Jogar mapas novos de estilos diferentes, sem repetir.",
+          "goal": "Jogar mapas novos de estilos diferentes, sem repetir (com tags: 3 de estilos que jogas menos, 2 de conforto).",
           "rules": ["1 a 2 tentativas por mapa; a 1.ª é a que conta.", "Opcional: HD nos mapas de ≤ 5,5★ para forçar a leitura."]},
     "D": {"title": "DT (1× por semana)", "minutes": 20,
           "goal": "Tolerar AR mais alto e subir a velocidade de tap, dentro do teu tecto em DT.",
@@ -182,7 +182,8 @@ class WeeklyPlanner:
         return band
 
     # ------------------------------------------------------------------ estado
-    def state(self, uid: int, plays: list[dict[str, Any]], goal: dict[str, Any], today: date, rejected: set[int] | None = None) -> dict[str, Any] | None:
+    def state(self, uid: int, plays: list[dict[str, Any]], goal: dict[str, Any], today: date, rejected: set[int] | None = None,
+              style_ctx: dict[str, Any] | None = None) -> dict[str, Any] | None:
         stats = nomod_stats(plays, today)
         band = self.test_band(uid, goal, stats)
         out: dict[str, Any] = {"week": week_id(today), "week_start": week_monday(today).isoformat(), "band": band, "stats": stats, "status": "unavailable",
@@ -205,7 +206,7 @@ class WeeklyPlanner:
                 return out
             if wid not in self._building:
                 self._building.add(wid)
-                threading.Thread(target=self._build_thread, args=(uid, plays, goal, today, band, stats, rejected), name="weekly-plan", daemon=True).start()
+                threading.Thread(target=self._build_thread, args=(uid, plays, goal, today, band, stats, rejected, style_ctx), name="weekly-plan", daemon=True).start()
         out["status"] = "building"
         return out
 
@@ -238,10 +239,10 @@ class WeeklyPlanner:
             hist.append({"week": plan["week"], "week_start": plan["week_start"], **plan["test"]["summary"], "band": plan["test"]["band"]})
         return hist[-HISTORY_WEEKS:]
 
-    def _build_thread(self, uid, plays, goal, today, band, stats, rejected=None) -> None:
+    def _build_thread(self, uid, plays, goal, today, band, stats, rejected=None, style_ctx=None) -> None:
         wid = week_id(today)
         try:
-            plan = build_plan(self.rec, uid, plays, today, band, stats, rejected)
+            plan = build_plan(self.rec, uid, plays, today, band, stats, rejected, style_ctx)
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = self._plan_file(uid, wid).with_suffix(".tmp")
             tmp.write_text(json.dumps(plan, ensure_ascii=False, default=str), encoding="utf-8")
@@ -300,8 +301,39 @@ def _dt_candidates(rec: Any, uid: int, ar_cap: float, skip: set[int]) -> tuple[l
     return [c for c in cands if c["ar"] >= 9.4 and c["beatmap_id"] not in skip], lim
 
 
+def _pick_styled(cands: list[dict[str, Any]], style_ctx: dict[str, Any], n: int = 5, growth: int = 3) -> list[dict[str, Any]]:
+    """Sessão C com estilos: até `growth` mapas de estilos DISTINTOS que o jogador joga menos (por ordem do z mais baixo), o resto em estilos
+    de conforto, diversificado por eixo. Só usa mapas com estilo dominante claro (peso ≥ 0,5) nos estilos de classe."""
+    from .styles import CLASS_STYLES
+
+    maps, prof = style_ctx["maps"], style_ctx["profile"]
+
+    def dom(c: dict[str, Any]) -> str | None:
+        w = {k: v for k, v in (maps.get(c["beatmap_id"]) or {}).items() if k in CLASS_STYLES}
+        if not w:
+            return None
+        k = max(w, key=w.get)
+        return k if w[k] >= 0.5 else None
+
+    by: dict[str, list[dict[str, Any]]] = {}
+    for c in cands:
+        d = dom(c)
+        if d:
+            by.setdefault(d, []).append(c)
+    primary = prof.get("primary")
+    order = [k for k in sorted(by, key=lambda k: prof["z"].get(k, 0.0)) if k != primary]  # os menos jogados primeiro
+    picked: list[dict[str, Any]] = []
+    for k in order:
+        if len(picked) >= growth:
+            break
+        picked.append(by[k][0])
+    rest = [c for c in cands if c not in picked and dom(c) in (None, primary)]
+    picked += _pick_diverse(rest, n - len(picked))
+    return picked[:n]
+
+
 def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, band: list[float], stats: dict[str, Any],
-               rejected: set[int] | None = None) -> dict[str, Any]:
+               rejected: set[int] | None = None, style_ctx: dict[str, Any] | None = None) -> dict[str, Any]:
     """Monta o teste e as sessões desta semana com o recomendador (só leitura local). `rejected` = mapas a que disseste "Não serve" (nunca entram)."""
     rej = set(rejected or ())
     ws = week_monday(today)
@@ -317,7 +349,11 @@ def build_plan(rec: Any, uid: int, plays: list[dict[str, Any]], today: date, ban
     consolidate = _consolidate(best, s90, rej)[:3]
     warm = sorted((p for p in best.values() if p["accuracy"] >= 0.97 and _stars(p) <= s90 - 0.8 and p["beatmap_id"] not in rej), key=lambda p: -p["accuracy"])[:2]
     stretch = ask(s_max + 0.1, s_max + 0.8, 2, mods="", min_p=0.2, order="p")[:2]
-    variety = _pick_diverse([c for c in ask(s90 - 0.3, s90 + 0.3, 60, mods="", min_p=0.6, order="p") if c["beatmap_id"] not in taken], 5)
+    if style_ctx:  # com tags: pede-se uma lista larga (os mapas de outros estilos são raros entre os mais prováveis)
+        wide = [c for c in ask(s90 - 0.3, s90 + 0.3, 5000, mods="", min_p=0.5, order="p") if c["beatmap_id"] not in taken]
+        variety = _pick_styled(wide, style_ctx)
+    else:
+        variety = _pick_diverse([c for c in ask(s90 - 0.3, s90 + 0.3, 60, mods="", min_p=0.6, order="p") if c["beatmap_id"] not in taken], 5)
     dt_all, dt_lim = _dt_candidates(rec, uid, ar_cap, rej)
     dt = dt_all[:3]
 

@@ -54,6 +54,10 @@ details.sess>summary{cursor:pointer;list-style:none;min-height:44px;display:flex
 details.sess>summary h3{margin:0}.bell{position:relative}.bell b{position:absolute;top:-6px;right:-6px;background:var(--bad);color:#fff;border-radius:99px;font-size:11px;padding:1px 6px}
 .nt{padding:8px 0;border-bottom:1px solid var(--border)}.nt.unread b{color:var(--accent)}.nt:last-child{border:0}
 .hero{border-left:6px solid var(--accent)}
+.chip.conforto{color:var(--good)}.chip.crescimento{color:var(--warn)}
+.sty{display:grid;grid-template-columns:78px 1fr 64px;gap:8px;align-items:center;margin:7px 0;font-size:13px}
+.sty .tk{position:relative;height:14px;border-radius:99px;background:var(--surface2)}.sty .tk i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:var(--accent)}.sty .tk b{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--text)}
+.cls{font:700 24px system-ui}
 </style></head><body><div class="wrap" id="app"><div class="card span2 sub">A carregar…</div></div>
 <script>
 const $=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!==undefined&&x!==null)e.textContent=x;return e};
@@ -92,8 +96,8 @@ function render(s){
  LAST=s;const app=document.getElementById("app");app.replaceChildren();
  if(s.error){app.appendChild($("div","card span2 banner bad",s.error));return}
  app.appendChild(headerCard(s));
- const tabs=$("div","tabs");[["hoje","Hoje"],["semana","Semana"],["progresso","Progresso"],["rival","Rival"]].forEach(([k,t])=>{const b=$("button",TAB===k?"on":"",t);b.onclick=()=>{TAB=k;saveTab();render(LAST)};tabs.appendChild(b)});app.appendChild(tabs);
- if(TAB==="hoje")tabHoje(app,s);else if(TAB==="semana")tabSemana(app,s);else if(TAB==="progresso")tabProgresso(app,s);else if(TAB==="rival")tabRival(app,s);else tabAvisos(app,s)}
+ const tabs=$("div","tabs");[["hoje","Hoje"],["semana","Semana"],["perfil","Perfil"],["progresso","Progresso"],["rival","Rival"]].forEach(([k,t])=>{const b=$("button",TAB===k?"on":"",t);b.onclick=()=>{TAB=k;saveTab();render(LAST)};tabs.appendChild(b)});app.appendChild(tabs);
+ if(TAB==="hoje")tabHoje(app,s);else if(TAB==="semana")tabSemana(app,s);else if(TAB==="perfil")tabPerfil(app,s);else if(TAB==="progresso")tabProgresso(app,s);else if(TAB==="rival")tabRival(app,s);else tabAvisos(app,s)}
 function tabAvisos(app,s){const c=$("div","card span2");c.appendChild($("h2","","Avisos"));const it=(s.notifications||{}).items||[];
  if(!it.length)c.appendChild($("div","sub","Sem avisos."));it.forEach(i=>{const d=$("div","nt"+(i.read?"":" unread"));d.append($("b","",i.title),$("div","sub",i.body),$("div","note",i.at.replace("T"," ")+(i.pushed?" · enviado ao telemóvel":"")));c.appendChild(d)});app.appendChild(c)}
 function nextSession(w){return w.sessions.find(x=>x.progress.done<x.progress.total)||null}
@@ -146,6 +150,24 @@ function projCard(app,s){
  if(P.what_if&&P.what_if.length){c.appendChild($("div","note","E se subires… (cenário, sem probabilidade): "+P.what_if.map(w=>`${n1(w.per_month)} pts/mês → ${mo(w.months)}`).join(" · ")))}
  c.appendChild($("div","note",`Limites: a ponte nível→pp é uma associação entre jogadores (R² ${n1(P.fit.r2*100)}%), não prova causal; o ritmo vem de poucas semanas; a meta (100.º de PT) também sobe com o tempo. Não há histórico de pp para estimar um ritmo típico de outros jogadores.`));
  app.appendChild(c)}
+const sg=v=>v==null?"—":(v>0?"+":"")+n1(v);
+function styleCard(S,who,title){
+ const c=$("div","card"),h=$("div","row");h.append($("h2","",title),$("span","sub",`${S.n_maps} mapas com tags`));c.appendChild(h);
+ c.appendChild($("div","cls",S.label));
+ const sub=[];if(S.strong)sub.push("forte em "+LBL[S.strong]);if(S.weak)sub.push("fraco em "+LBL[S.weak]);
+ c.appendChild($("div","sub",sub.length?sub.join(" · "):"sem pontos fortes/fracos claros no desempenho (ainda poucos dados)"));
+ const mx=Math.max(...Object.keys(LBL).map(k=>Math.max(S.share[k],BASE[k])),0.01);
+ Object.keys(LBL).forEach(k=>{const r=$("div","sty"),tk=$("div","tk"),i=$("i"),b=$("b");i.style.width=(S.share[k]/mx*100)+"%";b.style.left=(BASE[k]/mx*100)+"%";tk.append(i,b);
+  const p=S.performance[k];r.append($("span","",LBL[k]),tk,$("span","mono",p.acc_pts==null?`${Math.round(S.share[k]*100)} %`:`${Math.round(S.share[k]*100)} % · ${sg(p.acc_pts)}`));c.appendChild(r)});
+ return c}
+let LBL={},BASE={};
+function tabPerfil(app,s){
+ const S=s.styles;if(!S||!S.ok){app.appendChild($("div","card span2 sub",(S&&S.reason)||"Perfil de estilo indisponível."));return}
+ LBL=S.labels;BASE=S.base;
+ app.appendChild(styleCard(S.me,"me","O teu estilo"));
+ if(S.rival)app.appendChild(styleCard(S.rival,"rival",`Rival · ${s.rival?s.rival.username:""}`));
+ const n=$("div","card span2 note",`Barra = quota do estilo nos mapas que jogaste; traço = média dos ${S.n_players} jogadores acompanhados; o número à direita é o desempenho (pontos de accuracy acima/abaixo do que o modelo previa para o teu nível, só com ≥ 8 mapas nesse estilo). As classes vêm das tags votadas pela comunidade (estilo = jumps, streams, flow, alt, tech, stamina). Nos mapas do plano, "conforto" = estilo em que és forte ou que jogas muito; "crescimento" = estilo em que és fraco ou pouco jogado.`);
+ app.appendChild(n)}
 function tabRival(app,s){
  const rv=s.rival,rc=$("div","card span2");rc.appendChild($("h2","","Rival"));
  if(!rv){rc.appendChild($("div","sub","Ainda sem rival: faltam níveis fiáveis nos 4 eixos."));app.appendChild(rc);return}

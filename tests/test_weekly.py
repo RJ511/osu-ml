@@ -162,3 +162,17 @@ def test_rejected_maps_never_enter_a_new_plan_and_planner_persists_the_swap(tmp_
     again = planner.state(7, plays, {}, TODAY, rejected={bid})
     assert bid not in {m["beatmap_id"] for m in again["test"]["maps"]} and again["test"]["maps"][0]["beatmap_id"] == out["new"]["beatmap_id"]
     assert wk.WeeklyPlanner(None, tmp_path).reject(7, bid, plays, set(), TODAY)["replaced"] is False
+
+
+def test_pick_styled_takes_distinct_growth_styles_first_then_comfort():
+    cands = [{"beatmap_id": i, "dominant": "aim"} for i in range(1, 31)]
+    maps = {**{i: {"jumps": 1.0} for i in range(1, 21)}, **{21: {"streams": 0.9, "jumps": 0.1}, 22: {"streams": 0.8, "jumps": 0.2},
+                                                           23: {"tech": 1.0}, 24: {"alt": 0.6, "jumps": 0.4}, 25: {"flow": 0.45, "jumps": 0.55}}}
+    prof = {"primary": "jumps", "z": {"jumps": 0.6, "streams": -0.5, "tech": -0.2, "alt": -0.5, "flow": -0.55, "stamina": -0.6}}
+    out = wk._pick_styled(cands, {"maps": maps, "profile": prof}, n=5, growth=3)
+    ids = [c["beatmap_id"] for c in out]
+    assert len(ids) == 5 and len(set(ids)) == 5
+    growth = [i for i in ids if i in (21, 22, 23, 24)]
+    assert len(growth) == 3 and len({"streams" if i in (21, 22) else "tech" if i == 23 else "alt" for i in growth}) == 3  # 3 estilos distintos
+    assert all(i <= 20 or i in (26, 27, 28, 29, 30) or i in growth for i in ids) and 25 not in ids  # flow com peso < 0,5 não conta como estilo claro
+    assert wk._pick_styled([{"beatmap_id": 99, "dominant": "aim"}], {"maps": {}, "profile": prof}, n=5)[0]["beatmap_id"] == 99  # sem tags: cai para a diversidade por eixo

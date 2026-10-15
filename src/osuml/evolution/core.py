@@ -248,6 +248,7 @@ class Evolution:
             "rival": self._rival_with_detail({**me, "user_id": int(uid), "pp": pp_now}, levels, plays, today),
             "week": self._week(int(uid), plays, goal, today),
             "projection": self._projection(pp_now, target_pp, series, cons),
+            "styles": self._styles_safe(int(uid)),
             "data_quality": {"stale": stale, "last_check": (data.get("check") or {}).get("last_check_at"),
                              "plays_in_window": n_recent, "window_weeks": WINDOW_WEEKS},
         }
@@ -264,6 +265,34 @@ class Evolution:
         return out
 
     # ------------------------------------------------------------------ ações (feedback, verificar)
+    def styles(self) -> dict[str, Any] | None:
+        """Perfis de estilo (cache de 10 min). None se não houver tags/BD: é um extra, nunca deita a página abaixo."""
+        import time
+
+        now = time.time()
+        cached = getattr(self, "_styles_cache", None)
+        if cached and now - cached[0] < 600:
+            return cached[1]
+        try:
+            from . import styles as S
+
+            data = {"build": S.build(self.explorer.store), "maps": S.map_styles(self.explorer.store)}
+        except Exception as exc:  # noqa: BLE001
+            data = {"build": {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:160], "players": {}}, "maps": {}}
+        self._styles_cache = (now, data)
+        return data
+
+    def styles_state(self, uid: int, rival_id: int | None) -> dict[str, Any]:
+        d = self.styles()
+        b = d["build"]
+        if not b.get("ok"):
+            return {"ok": False, "reason": b.get("reason")}
+        me = b["players"].get(uid)
+        if me is None:
+            return {"ok": False, "reason": "poucos mapas com tags jogados para definir o teu estilo"}
+        return {"ok": True, "labels": b["styles"], "base": b["base"], "me": me, "rival": b["players"].get(rival_id) if rival_id else None,
+                "n_players": len(b["players"])}
+
     def _verdicts(self, uid: int) -> dict[int, str]:
         from sqlalchemy import select
 
@@ -282,9 +311,14 @@ class Evolution:
         w = copy.deepcopy(w)
         v = self._verdicts(uid)
         groups = [w["test"]["maps"]] + [s.get(k, []) for s in w["sessions"] for k in ("maps", "alternative")]
+        sd = self.styles()
+        prof = (sd["build"].get("players") or {}).get(uid)
+        from .styles import map_role
+
         for g in groups:
             for mp in g:
                 mp["verdict"] = v.get(int(mp["beatmap_id"]))
+                mp["style"] = map_role(sd["maps"].get(int(mp["beatmap_id"])), prof)
         return w
 
     def give_feedback(self, body: dict) -> dict[str, Any]:
@@ -321,7 +355,10 @@ class Evolution:
             return None
         try:
             rej = {b for b, v in self._verdicts(uid).items() if v == "nao_serve"}
-            return self._with_verdicts(self.weekly.state(uid, plays, goal, today, rejected=rej), uid)
+            sd = self.styles()
+            prof = (sd["build"].get("players") or {}).get(uid)
+            ctx = {"maps": sd["maps"], "profile": prof} if prof else None
+            return self._with_verdicts(self.weekly.state(uid, plays, goal, today, rejected=rej, style_ctx=ctx), uid)
         except Exception as exc:  # a semana de treino é um extra: nunca pode deitar a página abaixo
             return {"status": "error", "message": f"{type(exc).__name__}: {exc}"[:200]}
 
@@ -426,6 +463,13 @@ class Evolution:
         active_weeks = [w["days"] for w in cons["weeks"] if w["days"] > 0]
         days_hist = sum(active_weeks) / len(active_weeks) if active_weeks else None
         return project(pp_now, target_pp, fit_pp_vs_level(pts), mean_level_series({a: series[a] for a in AXES}, AXES), days_hist)
+
+    def _styles_safe(self, uid: int) -> dict[str, Any]:
+        try:
+            rv = self._rival_state().get("current") or {}
+            return self.styles_state(uid, rv.get("user_id"))
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"[:160]}
 
     def _projection(self, pp_now: Any, target_pp: Any, series: Any, cons: Any) -> dict[str, Any]:
         try:
