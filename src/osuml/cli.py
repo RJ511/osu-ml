@@ -711,6 +711,10 @@ def cmd_maintenance(args: argparse.Namespace, settings: Settings) -> int:
         out = mt.dumps_check(settings, window_days=args.window_days, force=args.force)
     elif step == "maps-load":
         out = mt.maps_load(settings, _store(settings), window_days=args.window_days, force=args.force, categorize=not args.no_categorize)
+    elif step == "osu-fill":
+        out = mt.osu_fill(settings, _store(settings), include_others=args.include_others, limit=args.limit, categorize=not args.no_categorize)
+    elif step == "goal-refresh":
+        out = mt.goal_refresh(settings, _store(settings), force=args.force)
     elif step == "retrain-plan":
         out = mt.retrain_plan(settings)
         if args.prepare and out.get("pending"):
@@ -942,13 +946,19 @@ def main(argv: list[str] | None = None) -> int:
     msub = mt_.add_subparsers(dest="maintenance_step", required=True)
     msub.add_parser("status", help="estado da manutenção (último treino, pedido de retreino, pacote enviado)")
     msub.add_parser("monthly-sim", help="simula a recalibração (não altera nada) e escreve o relatório do mês em data/reports/manutencao/")
-    dc = msub.add_parser("dumps-check", help="procura um dump novo completo no data.ppy.sh (só na 1.ª semana do mês) e marca o retreino como pendente")
-    dc.add_argument("--window-days", type=int, default=7)
-    dc.add_argument("--force", action="store_true", help="ignora a janela da 1.ª semana")
+    dc = msub.add_parser("dumps-check", help="procura um dump novo completo no data.ppy.sh (só nos primeiros 14 dias do mês) e marca o retreino como pendente")
+    dc.add_argument("--window-days", type=int, default=14)
+    dc.add_argument("--force", action="store_true", help="ignora a janela dos primeiros 14 dias")
     ml = msub.add_parser("maps-load", help="carrega os mapas do dump mensal de .osu (descarrega, importa por MD5, recategoriza; 0 pedidos à osu!API)")
     ml.add_argument("--window-days", type=int, default=31)
     ml.add_argument("--force", action="store_true", help="ignora a janela da 1.ª semana")
     ml.add_argument("--no-categorize", action="store_true", help="só importa os ficheiros, sem recategorizar")
+    of = msub.add_parser("osu-fill", help="pede ao mirror hinai só os .osu em falta (jogador do objetivo + rival; MD5 validado; 0 pedidos à osu!API)")
+    of.add_argument("--include-others", action="store_true", help="também os dos restantes jogadores (milhares; o dump oficial seguinte já os traz)")
+    of.add_argument("--limit", type=int, default=None)
+    of.add_argument("--no-categorize", action="store_true")
+    gr = msub.add_parser("goal-refresh", help="atualiza a meta do top 100 do país (1 pedido ao mirror, no máximo 1× por semana)")
+    gr.add_argument("--force", action="store_true", help="ignora o mínimo de 6 dias desde a última medição")
     pc = msub.add_parser("pack-check", help="decide se o pacote do S3 está desatualizado; com --upload reconstrói e envia (bucket privado)")
     pc.add_argument("--upload", action="store_true")
     pc.add_argument("--players", nargs="*", default=None, help="omissão: os do último pacote (PXD Vieira, gaaGOD)")

@@ -52,9 +52,10 @@ def _week_start(d: date) -> date:
 
 class Evolution:
     def __init__(self, explorer: Any, goal_path: Path, today: Any = None, weekly: Any | None = None, notifier: Any | None = None,
-                 recommender: Any | None = None, checker: Any | None = None, live: Any | None = None) -> None:
+                 recommender: Any | None = None, checker: Any | None = None, live: Any | None = None, strains: Any | None = None) -> None:
         self.explorer = explorer
         self.notifier, self.recommender, self.checker, self.live = notifier, recommender, checker, live
+        self.strains = strains  # mirror.client.StrainsPrefetcher (dificuldade ao longo do mapa); opcional
         self.weekly = weekly  # evolution.weekly.WeeklyPlanner (teste semanal + sessões); opcional
         self.goal_path = Path(goal_path)
         self.rival_path = self.goal_path.parent / "rival.json"
@@ -322,11 +323,23 @@ class Evolution:
                 need = self.recommender.acc_needed(uid, items)
             except Exception:  # noqa: BLE001
                 need = {}
+        curves: dict[Any, Any] = {}
+        if self.strains is not None:
+            try:  # dificuldade ao longo do mapa (do mirror, guardada em disco; o que falta é pedido em fundo para a próxima vez)
+                from ..mirror.client import compact_curve, load_strains
+
+                items = list({(int(mp["beatmap_id"]), mp.get("mods") or "") for g in groups for mp in g})
+                for key in items:
+                    curves[key] = compact_curve(load_strains(self.strains.raw_dir, key[0], key[1]))
+                self.strains.request([k for k in items if curves.get(k) is None])
+            except Exception:  # noqa: BLE001
+                curves = {}
         for g in groups:
             for mp in g:
                 mp["verdict"] = v.get(int(mp["beatmap_id"]))
                 mp["style"] = map_role(sd["maps"].get(int(mp["beatmap_id"])), prof)
                 mp["pp_need"] = need.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
+                mp["curve"] = curves.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
         return w
 
     def give_feedback(self, body: dict) -> dict[str, Any]:

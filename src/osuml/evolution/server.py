@@ -58,6 +58,7 @@ details.sess>summary h3{margin:0}.bell{position:relative}.bell b{position:absolu
 .sty{display:grid;grid-template-columns:78px 1fr 64px;gap:8px;align-items:center;margin:7px 0;font-size:13px}
 .sty .tk{position:relative;height:14px;border-radius:99px;background:var(--surface2)}.sty .tk i{position:absolute;left:0;top:0;bottom:0;border-radius:99px;background:var(--accent)}.sty .tk b{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--text)}
 .cls{font:700 24px system-ui}
+svg.curve{width:100%;height:30px;display:block;margin-top:6px}
 </style></head><body><div class="wrap" id="app"><div class="card span2 sub">A carregar…</div></div>
 <script>
 const $=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!==undefined&&x!==null)e.textContent=x;return e};
@@ -202,6 +203,12 @@ function rivalDetail(app,rv){
  tc.appendChild($("div","note","Meses com poucas jogadas (n baixo) são ruído. Só contam passes com accuracy ≥ 90 % em mapas que temos no dump; mapas mais recentes que o dump ficam de fora."));app.appendChild(tc)}
 const pc=v=>v==null?"—":(v*100).toFixed(1).replace(".",",")+" %";
 const chip=(t,c)=>$("span","chip"+(c?" "+c:""),t);
+function miniCurve(cv){
+ const W=300,H=30,v=cv.curve,n=v.length,svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("class","curve");svg.setAttribute("preserveAspectRatio","none");
+ const x=i=>i*W/(n-1),y=a=>H-2-a/100*(H-4);let d=`M0 ${H} `;v.forEach((a,i)=>{d+=`L${x(i).toFixed(1)} ${y(a).toFixed(1)} `});d+=`L${W} ${H} Z`;
+ const p=document.createElementNS(svg.namespaceURI,"path");p.setAttribute("d",d);p.setAttribute("fill","var(--accent)");p.setAttribute("opacity",".35");svg.appendChild(p);
+ const px=cv.peak_pct/100*W,l=document.createElementNS(svg.namespaceURI,"line");l.setAttribute("x1",px);l.setAttribute("x2",px);l.setAttribute("y1",0);l.setAttribute("y2",H);l.setAttribute("stroke","var(--accent)");l.setAttribute("stroke-width","1.5");svg.appendChild(l);
+ svg.appendChild(Object.assign(document.createElementNS(svg.namespaceURI,"title"),{textContent:`Dificuldade ao longo do mapa (${cv.length_s} s): pico aos ${cv.peak_pct} %`}));return svg}
 function planRow(m,test,kind){
  const r=$("div","map"),a=$("a","t",m.label);a.href=m.url;a.target="_blank";a.rel="noopener";r.appendChild(a);
  const c=$("div","chips");c.appendChild(chip(`${n1(m.stars)}★`));if(m.ar)c.appendChild(chip("AR "+n1(m.ar)));if(m.mods)c.appendChild(chip("+"+m.mods));
@@ -210,12 +217,14 @@ function planRow(m,test,kind){
  if(m.pp_need){const n=m.pp_need;
   if(n.acc_1==null)c.appendChild(chip("sem ganho de pp"));
   else c.appendChild(chip(`+1 pp ≥ ${pc(n.acc_1)}`+(n.acc_5!=null?` · +5 pp ≥ ${pc(n.acc_5)}`:"")))}
+ if(m.curve)c.appendChild(chip(`pico aos ${m.curve.peak_pct} %`));
  if(m.style)c.appendChild(chip(m.style.label+(m.style.role==="neutro"?"":" · "+m.style.role),m.style.role==="neutro"?"":m.style.role));
  const st=m.status;
  if(st&&st.played){if(test)c.appendChild(chip(`1.ª jogada: ${pc(st.first_acc)} ${st.first_passed?"✓":"✗"}`,st.first_passed?"pass":"fail"));
   else c.appendChild(chip(`${st.attempts} tent. · melhor ${pc(st.best_acc)}${st.passed?" ✓":" ✗"}`,st.passed?"pass":"fail"))}
  else c.appendChild(chip("por jogar"));
  r.appendChild(c);
+ if(m.curve)r.appendChild(miniCurve(m.curve));
  if(kind&&m.beatmap_id){const f=$("div","fb"),mk=(v,t,cls)=>{const b=$("button","btn "+cls+(m.verdict===v?" on":""),t);
    b.onclick=async()=>{b.disabled=true;const res=await post("/api/feedback",{beatmap_id:m.beatmap_id,verdict:v,kind:kind});if(!res.error){m.verdict=v;[...f.children].forEach(x=>x.classList.remove("on"));b.classList.add("on");
     if(v==="nao_serve"&&res.swap){b.textContent=res.swap.replaced?(res.swap.new?"trocado ✓":"removido ✓"):(res.swap.reason||"registado");if(res.swap.replaced)setTimeout(load,700)}}b.disabled=false};return b};

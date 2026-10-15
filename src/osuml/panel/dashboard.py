@@ -91,6 +91,7 @@ def make_dashboard(collect_ctrl: Any, categorize_ctrl: Any | None, port: int, ch
 
             from ..evolution.live import LiveCalibrator
             from ..evolution.notify import Notifier
+            from ..mirror.client import StrainsPrefetcher
 
             import json as _json
 
@@ -100,7 +101,8 @@ def make_dashboard(collect_ctrl: Any, categorize_ctrl: Any | None, port: int, ch
                 uid = 0
             live = LiveCalibrator(categorize_ctrl.store, recommender, uid) if recommender is not None and uid else None
             evo = Evolution(explorer, goal_path, weekly=WeeklyPlanner(recommender, Path(goal_path).parent),
-                            notifier=Notifier(Path(goal_path).parent / "notifications.json"), recommender=recommender, checker=checker, live=live)
+                            notifier=Notifier(Path(goal_path).parent / "notifications.json"), recommender=recommender, checker=checker, live=live,
+                            strains=StrainsPrefetcher(categorize_ctrl.store, Path(categorize_ctrl.store.raw.raw_dir) / "hinai_strains", Path(goal_path).parent / "mirror_usage.json"))
             if live is not None:
                 live.start()
             # primeiro separador (e o de arranque): é a vista para o dia a dia, também no telemóvel

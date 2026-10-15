@@ -546,3 +546,56 @@ def status(settings, store=None) -> dict[str, Any]:
     reports = sorted((settings.data_dir / "reports" / "manutencao").glob("*.txt")) if (settings.data_dir / "reports" / "manutencao").exists() else []
     out["last_monthly_report"] = str(reports[-1]) if reports else None
     return out
+
+
+# ------------------------------------------------------------------ usos do mirror hinai (autorizados a 2026-10-15)
+def _priority_users(settings) -> list[int]:
+    """Jogador do objetivo e rival atual (os `.osu` deles são os que a página mais usa)."""
+    ctrl = settings.data_dir / "control"
+    out: list[int] = []
+    for f, path in (("goal", ("user_id",)), ("rival", ("current", "user_id"))):
+        try:
+            d = json.loads((ctrl / f"{f}.json").read_text(encoding="utf-8"))
+            for k in path:
+                d = d[k]
+            out.append(int(d))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def osu_fill(settings, store, *, include_others: bool = False, limit: int | None = None, categorize: bool = True,
+             client_factory: Callable[[Any], Any] | None = None) -> dict[str, Any]:
+    """Pede ao mirror hinai só os `.osu` que faltam (ranked/loved/approved com checksum conhecido) do jogador do objetivo e do rival; com `include_others`,
+    também os dos restantes jogadores (milhares: o dump oficial seguinte já os traz, por isso é opt-in). MD5 validado, teto diário, guard. Recategoriza se guardou algo."""
+    from .mirror.client import MirrorClient, Usage, fill_osu_files, missing_osu
+
+    todo = missing_osu(store, _priority_users(settings), include_others)
+    if limit is not None:
+        todo = todo[:limit]
+    out: dict[str, Any] = {"missing": len(todo)}
+    if not todo:
+        out["reason"] = "nada em falta para pedir"
+        return out
+    client = (client_factory or MirrorClient)(store)
+    try:
+        out.update(fill_osu_files(client, store, Usage(settings.data_dir / "control" / "mirror_usage.json"), todo))
+    finally:
+        client.close()
+    if categorize and out.get("saved"):
+        out["categorize"] = _categorize_all(settings, store)
+    log_event(settings, {"task": "osu-fill", **{k: v for k, v in out.items() if k != "categorize"}})
+    return out
+
+
+def goal_refresh(settings, store, *, force: bool = False, client_factory: Callable[[Any], Any] | None = None) -> dict[str, Any]:
+    """Atualiza a meta (pp do rank-alvo do país) em `goal.json`, no máximo 1× por semana, com 1 pedido ao mirror."""
+    from .mirror.client import MirrorClient, Usage, refresh_goal
+
+    client = (client_factory or MirrorClient)(store)
+    try:
+        out = refresh_goal(client, Usage(settings.data_dir / "control" / "mirror_usage.json"), settings.data_dir / "control" / "goal.json", force=force)
+    finally:
+        client.close()
+    log_event(settings, {"task": "goal-refresh", **out})
+    return out
