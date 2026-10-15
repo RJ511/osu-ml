@@ -315,10 +315,18 @@ class Evolution:
         prof = (sd["build"].get("players") or {}).get(uid)
         from .styles import map_role
 
+        need: dict[Any, Any] = {}
+        if self.recommender is not None:
+            try:  # accuracy necessária para ganhar pp: extra, nunca deita o plano abaixo
+                items = list({(int(mp["beatmap_id"]), mp.get("mods") or "") for g in groups for mp in g})
+                need = self.recommender.acc_needed(uid, items)
+            except Exception:  # noqa: BLE001
+                need = {}
         for g in groups:
             for mp in g:
                 mp["verdict"] = v.get(int(mp["beatmap_id"]))
                 mp["style"] = map_role(sd["maps"].get(int(mp["beatmap_id"])), prof)
+                mp["pp_need"] = need.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
         return w
 
     def give_feedback(self, body: dict) -> dict[str, Any]:

@@ -207,6 +207,10 @@ function planRow(m,test,kind){
  const c=$("div","chips");c.appendChild(chip(`${n1(m.stars)}★`));if(m.ar)c.appendChild(chip("AR "+n1(m.ar)));if(m.mods)c.appendChild(chip("+"+m.mods));
  if(m.best_acc&&!(m.status&&m.status.played))c.appendChild(chip("tens "+pc(m.best_acc)));if(m.target)c.appendChild(chip("alvo "+pc(m.target)));
  if(!test&&m.p_pass!=null&&!m.best_acc)c.appendChild(chip("P(passar) "+Math.round(m.p_pass*100)+" %"));if(m.dominant)c.appendChild(chip(m.dominant));
+ if(m.pp_need){const n=m.pp_need;
+  if(n.acc_1==null)c.appendChild(chip("sem ganho de pp"));
+  else c.appendChild(chip(`+1 pp ≥ ${pc(n.acc_1)}`+(n.acc_5!=null?` · +5 pp ≥ ${pc(n.acc_5)}`:"")))}
+ if(m.style)c.appendChild(chip(m.style.label+(m.style.role==="neutro"?"":" · "+m.style.role),m.style.role==="neutro"?"":m.style.role));
  const st=m.status;
  if(st&&st.played){if(test)c.appendChild(chip(`1.ª jogada: ${pc(st.first_acc)} ${st.first_passed?"✓":"✗"}`,st.first_passed?"pass":"fail"));
   else c.appendChild(chip(`${st.attempts} tent. · melhor ${pc(st.best_acc)}${st.passed?" ✓":" ✗"}`,st.passed?"pass":"fail"))}
@@ -222,6 +226,7 @@ function tabSemana(app,s){
  if(w.status==="building"){app.appendChild($("div","card span2 sub","A preparar o plano da semana…"));setTimeout(load,6000)}
  else if(w.status!=="ready"){app.appendChild($("div","card span2 sub",w.message||"Plano da semana indisponível."))}
  const t=$("div","card span2"),tr=$("div","row");tr.append($("h2","","Teste semanal"),$("span","tag",`${w.week} · faixa ${w.band?n1(w.band[0])+"–"+n1(w.band[1])+"★":"—"}`));t.appendChild(tr);
+ if(w.band_raised)t.appendChild($("div","banner",`Faixa do teste subida de ${n1(w.band_raised.from[0])}–${n1(w.band_raised.from[1])}★ para ${n1(w.band_raised.to[0])}–${n1(w.band_raised.to[1])}★: 3 semanas seguidas com a 1.ª jogada ≥ 93 %. As semanas novas já não se comparam com as anteriores.`));
  if(w.status==="ready"){const sm=w.test.summary,row=$("div","row");row.append($("span","big",`${sm.done}/${sm.total}`),$("span","sub",sm.done?`1.ª jogada: passaste ${sm.first_pass}/${sm.done} · accuracy mediana ${pc(sm.first_acc_median)}`:"ainda nenhum jogado"));t.appendChild(row);
   t.appendChild($("div","note",w.test.how));w.test.maps.forEach(m=>t.appendChild(planRow(m,true,"teste")))}
  if(w.series&&w.series.length){

@@ -21,6 +21,10 @@ TEST_MAPS = 5
 MIN_EVIDENCE_ACC = 0.90
 COMFORT_ACC = 0.93
 MIN_PASSES_FOR_BAND = 5
+RAISE_WEEKS = 3         # semanas seguidas na mesma faixa, com a accuracy mediana da 1.ª jogada acima do limiar, para subir a faixa
+RAISE_ACC = 0.93
+RAISE_STEP = 0.3        # estrelas que a faixa sobe
+RAISE_MIN_DONE = 3      # mapas do teste feitos numa semana para ela contar
 HISTORY_WEEKS = 12
 BLOCKS = {
     "A": {"title": "Consolidar", "minutes": 20,
@@ -181,13 +185,46 @@ class WeeklyPlanner:
             f.write_text(json.dumps({"band": band, "created_at": datetime.now().isoformat(), "stats": stats}), encoding="utf-8")
         return band
 
+    def maybe_raise_band(self, uid: int, plays: list[dict[str, Any]], today: date, band: list[float]) -> tuple[list[float], dict[str, Any] | None]:
+        """Sobe a faixa em `RAISE_STEP` estrelas se as últimas `RAISE_WEEKS` semanas (seguidas, todas nesta faixa, com ≥ `RAISE_MIN_DONE` mapas feitos) tiveram a
+        accuracy mediana da 1.ª jogada ≥ `RAISE_ACC`. A nova faixa fica guardada (as semanas seguintes são comparáveis entre si, não com as anteriores)."""
+        hist = [h for h in self._history(uid, plays, today) if h["done"] >= RAISE_MIN_DONE]
+        last = hist[-RAISE_WEEKS:]
+        if len(last) < RAISE_WEEKS:
+            return band, None
+        starts = [date.fromisoformat(h["week_start"]) for h in last]
+        consecutive = all((b - a).days == 7 for a, b in zip(starts, starts[1:])) and (week_monday(today) - starts[-1]).days == 7
+        same = all([float(h["band"][0]), float(h["band"][1])] == [band[0], band[1]] for h in last)
+        if not (consecutive and same and all(h["first_acc_median"] is not None and h["first_acc_median"] >= RAISE_ACC for h in last)):
+            return band, None
+        new = [round(band[0] + RAISE_STEP, 1), round(band[1] + RAISE_STEP, 1)]
+        f = self._band_file(uid)
+        data = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+        data.update({"band": new, "raised_at": datetime.now().isoformat(), "raised_from": band,
+                     "raises": data.get("raises", []) + [{"at": today.isoformat(), "from": band, "to": new, "weeks": [h["week"] for h in last]}]})
+        self.dir.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return new, {"from": band, "to": new}
+
     # ------------------------------------------------------------------ estado
     def state(self, uid: int, plays: list[dict[str, Any]], goal: dict[str, Any], today: date, rejected: set[int] | None = None,
               style_ctx: dict[str, Any] | None = None) -> dict[str, Any] | None:
         stats = nomod_stats(plays, today)
         band = self.test_band(uid, goal, stats)
+        raised = None
+        if band is not None and not goal.get("test_band") and not self._plan_file(uid, week_id(today)).exists():  # só antes de gerar o plano desta semana
+            band, raised = self.maybe_raise_band(uid, plays, today, band)
         out: dict[str, Any] = {"week": week_id(today), "week_start": week_monday(today).isoformat(), "band": band, "stats": stats, "status": "unavailable",
                                "series": first_time_series(plays, band, today) if band else [], "history": self._history(uid, plays, today)}
+        if raised:
+            out["band_raised"] = raised
+        elif band is not None and self._band_file(uid).exists():  # subida recente (últimas 2 semanas): continua a aparecer na página
+            try:
+                d = json.loads(self._band_file(uid).read_text(encoding="utf-8"))
+                if d.get("raised_at") and (datetime.now() - datetime.fromisoformat(d["raised_at"])).days < 14:
+                    out["band_raised"] = {"from": d["raised_from"], "to": d["band"]}
+            except (OSError, ValueError, KeyError):
+                pass
         if band is None:
             out["message"] = "ainda sem passes sem mods suficientes para definir a tua faixa"
             return out

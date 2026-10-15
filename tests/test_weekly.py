@@ -216,3 +216,43 @@ def test_session_scale_and_style_pick_with_rival_guides_growth_styles():
     styles_picked = [dom_of(c["beatmap_id"]) for c in pick if dom_of(c["beatmap_id"]) != "jumps"]
     assert styles_picked[0] == "tech"  # o rival joga mais tech do que tu: é o 1.º estilo de crescimento
     assert len(set(styles_picked)) == len(styles_picked) == 3
+
+
+def _write_week(tmp_path, uid, week_start, acc, band=(5.8, 6.5), done=4):
+    import json
+    wid = wk.week_id(week_start)
+    maps = [{"beatmap_id": 1000 + i + int(week_start.strftime("%j")) * 10} for i in range(5)]
+    plan = {"week": wid, "week_start": week_start.isoformat(), "stats": {}, "test": {"band": list(band), "maps": maps}, "sessions": []}
+    d = tmp_path / "weekly"
+    d.mkdir(exist_ok=True)
+    (d / f"{uid}_{wid}.json").write_text(json.dumps(plan), encoding="utf-8")
+    return [play(m["beatmap_id"], (TODAY - week_start).days - 1, acc, stars=6.0) for m in maps[:done]]
+
+
+def test_band_rises_after_three_consecutive_weeks_above_the_threshold_and_not_otherwise(tmp_path):
+    from datetime import timedelta
+    planner = wk.WeeklyPlanner(FakeRec(), tmp_path)
+    mon = wk.week_monday(TODAY)
+    weeks = [mon - timedelta(days=7 * k) for k in (3, 2, 1)]
+    plays = []
+    for w in weeks:
+        plays += _write_week(tmp_path, 7, w, 0.95)
+    band, info = planner.maybe_raise_band(7, plays, TODAY, [5.8, 6.5])
+    assert info == {"from": [5.8, 6.5], "to": [6.1, 6.8]} and band == [6.1, 6.8]
+    assert wk.json.loads((tmp_path / "weekly" / "7_test_band.json").read_text(encoding="utf-8"))["band"] == [6.1, 6.8]
+    # uma semana com accuracy baixa (ou poucos mapas, ou faixa diferente) impede a subida
+    tmp2 = tmp_path / "b"
+    tmp2.mkdir()
+    p2 = wk.WeeklyPlanner(FakeRec(), tmp2)
+    pl = _write_week(tmp2, 7, weeks[0], 0.95) + _write_week(tmp2, 7, weeks[1], 0.90) + _write_week(tmp2, 7, weeks[2], 0.95)
+    assert p2.maybe_raise_band(7, pl, TODAY, [5.8, 6.5])[1] is None
+    tmp3 = tmp_path / "c"
+    tmp3.mkdir()
+    p3 = wk.WeeklyPlanner(FakeRec(), tmp3)
+    pl = _write_week(tmp3, 7, weeks[0], 0.95) + _write_week(tmp3, 7, weeks[1], 0.95, done=2) + _write_week(tmp3, 7, weeks[2], 0.95)
+    assert p3.maybe_raise_band(7, pl, TODAY, [5.8, 6.5])[1] is None  # uma semana com menos de 3 mapas feitos não conta
+    tmp4 = tmp_path / "d"
+    tmp4.mkdir()
+    p4 = wk.WeeklyPlanner(FakeRec(), tmp4)
+    pl = _write_week(tmp4, 7, weeks[0], 0.95, band=(5.5, 6.2)) + _write_week(tmp4, 7, weeks[1], 0.95) + _write_week(tmp4, 7, weeks[2], 0.95)
+    assert p4.maybe_raise_band(7, pl, TODAY, [5.8, 6.5])[1] is None  # a faixa mudou a meio: recomeça a contagem

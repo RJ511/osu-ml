@@ -32,15 +32,17 @@ def test_only_complete_snapshots_count():
     assert mt.complete_snapshots("") == []
 
 
-def test_dumps_check_only_acts_in_the_first_week_and_marks_a_retrain_once(tmp_path):
+def test_dumps_check_only_acts_in_the_first_two_weeks_and_marks_a_retrain_once(tmp_path):
     st = _settings(tmp_path)
 
     def fetch_none():
         raise AssertionError("fora da janela não se vai à rede")
 
     out = mt.dumps_check(st, today=date(2026, 9, 25), fetch=fetch_none)
-    assert out["checked"] is False and "1.ª semana" in out["reason"] and not (st.data_dir / "control" / "retrain_pending.json").exists()
+    assert out["checked"] is False and "2 primeiras semanas" in out["reason"] and not (st.data_dir / "control" / "retrain_pending.json").exists()
     out = mt.dumps_check(st, today=date(2026, 10, 2), fetch=lambda: LISTING)  # 09_01 é o que já está treinado
+    assert mt.dumps_check(st, today=date(2026, 10, 14), fetch=lambda: LISTING)["checked"] is True  # dia 14 ainda está na janela (alargada de 7 para 14 dias)
+    assert mt.dumps_check(st, today=date(2026, 10, 15), fetch=fetch_none)["checked"] is False  # dia 15 já não
     assert out["checked"] is True and out["new"] is False and out["latest_complete_snapshot"] == "2026_09_01"
     full = LISTING + '<a href="2026_10_01_performance_osu_top_10000.tar.bz2">x</a><a href="2026_10_01_osu_files.tar.bz2">x</a>'
     out = mt.dumps_check(st, today=date(2026, 10, 3), fetch=lambda: full)

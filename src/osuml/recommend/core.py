@@ -697,6 +697,36 @@ class Recommender:
                              f"{'nomod' if mods_cal.get('acc_source') == 'nomod' else 'DT'} com deslocamento {float(mods_cal.get('acc_shift') or 0) * 100:+.1f} pts. Previsões indicativas."]
                             if mods and mods_cal else [])]}
 
+    def acc_needed(self, user_id: int, items: list[tuple[int, str]], thresholds: tuple[float, ...] = (1.0, 5.0)) -> dict[tuple[int, str], dict[str, Any] | None]:
+        """Para cada (beatmap_id, mods): accuracy mínima (modelo do pp oficial, grelha de 0,25 pts) para os pp TOTAIS do jogador subirem ≥ cada limiar
+        (entrar no top com ganho, ou substituir o score antigo do mapa), e o ganho máximo a 99,5 %. None sem modelo/catálogo/linha do mapa.
+        É uma estimativa (erro típico do pp ~10 %): serve para ordenar e dar uma ideia, não para o pp exato."""
+        import numpy as np
+
+        pp_model = self._pp_model()
+        if pp_model is None or not items:
+            return {k: None for k in items}
+        from .ppgain import marginal_gain, player_best_pp, replace_gain
+
+        best = player_best_pp(self.store, user_id)
+        plist = np.sort(np.array(list(best.values()), dtype=float))[::-1]
+        grid = np.round(np.arange(0.85, 0.99501, 0.0025), 4)
+        out: dict[tuple[int, str], dict[str, Any] | None] = {}
+        for bid, mods in items:
+            mk = normalize_mods(mods)
+            pps = pp_model.predict(np.full(len(grid), int(bid)), grid, mods=mk or "") if mk is not None else np.full(len(grid), np.nan)
+            if np.isnan(pps).all():
+                out[(bid, mods)] = None
+                continue
+            old = best.get(int(bid))
+            gains = np.array([replace_gain(plist, old, float(x)) for x in pps]) if old is not None else marginal_gain(plist, pps)
+            row: dict[str, Any] = {"max_gain": round(float(np.nanmax(gains)), 1), "pp_at_max": round(float(pps[-1]), 0)}
+            for t in thresholds:
+                ok = np.nonzero(gains >= t)[0]
+                row[f"acc_{int(t)}"] = float(grid[ok[0]]) if len(ok) else None
+            out[(bid, mods)] = row
+        return out
+
     def band_candidates(self, user_id: int, stars_lo: float, stars_hi: float, *, mods: str = "", min_p: float = 0.0, max_ar: float | None = None,
                         unseen: bool = True, n: int = 20, order: str = "p", seed: int = 0) -> list[dict[str, Any]]:
         """Mapas numa faixa de estrelas (com esses mods) para montar sessões de treino e o teste semanal: sem os já jogados (`unseen`, com quaisquer mods), sem os bloqueados, com AR efetivo ≤ `max_ar`

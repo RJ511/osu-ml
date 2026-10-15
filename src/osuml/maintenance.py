@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 DUMPS_URL = "https://data.ppy.sh/"
-WINDOW_DAYS = 7  # o dump sai no dia 1; procura-se na 1.ª semana
+WINDOW_DAYS = 14  # o dump nem sempre sai no dia 1 (ex.: 2026_07_13): procura-se nas 2 primeiras semanas
 DEFAULT_PACK_PLAYERS = ["PXD Vieira", "gaaGOD"]
 MIN_DAYS_BETWEEN_UPLOADS = 7  # sem modelo novo, não se reenvia o pacote mais vezes do que isto
 ACC_DELTA = 0.01          # 1 ponto de accuracy
@@ -99,7 +99,7 @@ def dumps_check(settings, *, today: date | None = None, window_days: int = WINDO
     pending_f = control_dir(settings) / "retrain_pending.json"
     out: dict[str, Any] = {"today": today.isoformat(), "trained_snapshot": state["trained_snapshot"], "checked": False, "new": False}
     if today.day > window_days and not force:
-        out["reason"] = f"fora da janela (só na 1.ª semana do mês: dias 1–{window_days})"
+        out["reason"] = f"fora da janela (só nas 2 primeiras semanas do mês: dias 1–{window_days})"
         return out
     listing = fetch()
     snaps = complete_snapshots(listing)
