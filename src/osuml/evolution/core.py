@@ -229,6 +229,9 @@ class Evolution:
         today = self._today()
         plays, me = data["plays"], data["player"]
         self._plays_labels = {int(p["beatmap_id"]): p["map"] for p in plays if p.get("beatmap_id") and p.get("map")}
+        fd = self.fails_data(int(uid), self._plays_labels)
+        for p in plays:  # reinícios (saíste tu): não contam como tentativa a sério no teste semanal
+            p["reset"] = p.get("score_id") in fd.get("reset_ids", ())
         series = self.levels_by_week(plays, today)
         trends = {a: self.trend(series[a]) for a in series}
         levels, levels_age = self.current_levels(series)
@@ -290,10 +293,13 @@ class Evolution:
             summ = FL.summarize(rows)
             for mp in summ["maps"]:
                 mp["label"] = labels.get(mp["beatmap_id"], f"mapa #{mp['beatmap_id']}")
+            for tm in summ["reset_habit"]["top_maps"]:
+                tm["label"] = labels.get(tm["beatmap_id"], f"mapa #{tm['beatmap_id']}")
             if self.strains is not None:  # mapas onde mais falhas: pede-se a curva em fundo (a próxima atualização já traz a posição no mapa)
                 top = [(mp["beatmap_id"], "") for mp in summ["maps"][:40]]
                 self.strains.request(top)
-            data = {"uid": uid, "ok": True, "summary": {**summ, "maps": summ["maps"][:10]}, "by_map": {mp["beatmap_id"]: mp for mp in summ["maps"]}}
+            data = {"uid": uid, "ok": True, "summary": {**summ, "maps": summ["maps"][:10]}, "by_map": {mp["beatmap_id"]: mp for mp in summ["maps"]},
+                    "reset_ids": FL.reset_score_ids(rows)}
         except Exception as exc:  # noqa: BLE001
             data = {"uid": uid, "ok": False, "reason": f"{type(exc).__name__}: {exc}"[:160], "by_map": {}}
         self._fails_cache = (now, data)
@@ -374,7 +380,7 @@ class Evolution:
                 mp["pp_need"] = need.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
                 mp["curve"] = curves.get((int(mp["beatmap_id"]), mp.get("mods") or ""))
                 fl = self.fails_data(uid, {}).get("by_map", {}).get(int(mp["beatmap_id"]))
-                mp["fails"] = {"n": fl["fails"], "deaths": fl["deaths"], "points": fl["points"]} if fl else None
+                mp["fails"] = {"n": fl["fails"], "deaths": fl["deaths"], "resets": fl["resets"], "points": fl["points"]} if fl else None
         return w
 
     def give_feedback(self, body: dict) -> dict[str, Any]:

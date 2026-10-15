@@ -106,9 +106,12 @@ def default_band(stats: dict[str, Any]) -> list[float] | None:
 
 
 def first_plays(plays: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    """1.ª jogada de sempre de cada mapa (com quaisquer mods), por ordem cronológica."""
+    """1.ª jogada de sempre de cada mapa (com quaisquer mods), por ordem cronológica. Os **reinícios** (saíste tu, a vida não acabava; `p["reset"]`) não contam:
+    reiniciar é um hábito (perfeccionismo, bloqueio, querer accuracy alta) e não mede a habilidade; conta a 1.ª vez que jogaste a sério (passaste ou a vida acabou)."""
     first: dict[int, dict[str, Any]] = {}
     for p in sorted(plays, key=lambda q: str(q["ended_at"] or "")):
+        if p.get("reset"):
+            continue
         first.setdefault(p["beatmap_id"], p)
     return first
 
@@ -128,13 +131,17 @@ def first_time_series(plays: list[dict[str, Any]], band: list[float], today: dat
     return out
 
 
-def _map_status(plays: list[dict[str, Any]], bid: int, mods: str, start: date, end: date) -> dict[str, Any]:
+def _map_status(plays: list[dict[str, Any]], bid: int, mods: str, start: date, end: date, committed: bool = False) -> dict[str, Any]:
+    """Estado de um mapa nesta semana. `committed=True` (teste semanal): só conta a 1.ª jogada a sério, sem os reinícios (que ficam em `resets`); um mapa em que só
+    reiniciaste ainda não está "feito"."""
     mine = sorted((p for p in plays if p["beatmap_id"] == bid and _mods(p) == mods and (d := _day(p["ended_at"])) and start <= d < end),
                   key=lambda q: str(q["ended_at"] or ""))
-    if not mine:
-        return {"played": False}
-    passes = [p["accuracy"] for p in mine if p["passed"] and p["accuracy"]]
-    return {"played": True, "attempts": len(mine), "first_acc": mine[0]["accuracy"], "first_passed": bool(mine[0]["passed"]),
+    basis = [p for p in mine if not p.get("reset")] if committed else mine
+    resets = sum(1 for p in mine if p.get("reset"))
+    if not basis:
+        return {"played": False, "resets": resets} if resets else {"played": False}
+    passes = [p["accuracy"] for p in basis if p["passed"] and p["accuracy"]]
+    return {"played": True, "attempts": len(mine), "resets": resets, "first_acc": basis[0]["accuracy"], "first_passed": bool(basis[0]["passed"]),
             "best_acc": max(passes) if passes else None, "passed": bool(passes)}
 
 
@@ -143,7 +150,7 @@ def evaluate(plan: dict[str, Any], plays: list[dict[str, Any]]) -> dict[str, Any
     start = date.fromisoformat(plan["week_start"])
     end = start + timedelta(days=7)
     for m in plan["test"]["maps"]:
-        m["status"] = _map_status(plays, m["beatmap_id"], "", start, end)
+        m["status"] = _map_status(plays, m["beatmap_id"], "", start, end, committed=True)
     done = [m["status"] for m in plan["test"]["maps"] if m["status"]["played"]]
     accs = [s["first_acc"] for s in done if s["first_passed"] and s["first_acc"]]
     plan["test"]["summary"] = {"done": len(done), "total": len(plan["test"]["maps"]), "first_pass": sum(s["first_passed"] for s in done),

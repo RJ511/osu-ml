@@ -70,13 +70,19 @@ def outcome(plays, hp: float | None) -> dict[str, Any] | None:
     basis = lazer or list(plays)  # com tentativas do lazer só se contam essas para passar/1.ª tentativa (o stable não regista falhas)
     passes = [p for p in plays if p[0]]
     deaths = restarts = 0
+    committed = []  # tentativas "a sério": passes e falhas em que a vida podia acabar; os reinícios (saíste tu) não medem habilidade e ficam de fora
     for p in lazer:
         if not p[0] and hp is not None:
             k, _ = classify(p[2] or {}, hp, p[3] or "")
             deaths += k in DEATH_CLASSES
             restarts += k == "reinicio_certo"
-    return {"n_attempts": len(plays), "n_lazer_attempts": len(lazer), "passed": bool(any(p[0] for p in basis)),
-            "first_try_passed": bool(basis[0][0]) if lazer else None, "best_acc": float(max(p[1] or 0.0 for p in passes)) if passes else None,
+            if k == "reinicio_certo":
+                continue
+        committed.append(p)
+    ever = bool(any(p[0] for p in basis))
+    only_resets = bool(lazer) and not ever and deaths == 0 and restarts > 0 and not committed  # só reiniciou: não há informação sobre se seria capaz de passar
+    return {"n_attempts": len(plays), "n_lazer_attempts": len(lazer), "passed": None if only_resets else ever,
+            "first_try_passed": (bool(committed[0][0]) if committed else None) if lazer else None, "best_acc": float(max(p[1] or 0.0 for p in passes)) if passes else None,
             "n_deaths_possible": deaths, "n_restarts": restarts,
             "best_pp": max((p[6] for p in passes if len(p) > 6 and p[6] is not None), default=None)}
 
@@ -187,10 +193,25 @@ def shadow_evaluate(store, rec, *, since: datetime | None = None, batch: str = "
     return stats
 
 
+def fix_reset_only_rows(store) -> int:
+    """Pares avaliados antes de os reinícios deixarem de contar: se TODAS as tentativas do lazer foram reinícios certos (nenhuma morte, nenhum passe), `passed`
+    e `first_try_passed` passam a NULL (sem veredicto: reiniciar não mede habilidade). Idempotente. Devolve quantas linhas mudou."""
+    from sqlalchemy import update
+
+    from ..storage import models as m
+
+    pl = m.prediction_log
+    with store.engine.begin() as c:
+        res = c.execute(update(pl).where(pl.c.passed.is_(False), pl.c.n_lazer_attempts > 0, pl.c.n_deaths_possible == 0, pl.c.n_restarts > 0,
+                                         pl.c.n_restarts == pl.c.n_lazer_attempts).values(passed=None, first_try_passed=None))
+    return int(res.rowcount or 0)
+
+
 def evaluate_pending(store, rec, *, since: datetime | None = None, batch: str = "new") -> dict[str, Any]:
     """Uma passagem completa: liga as recomendações que já foram jogadas e faz a avaliação-sombra das jogadas novas."""
+    fixed = fix_reset_only_rows(store)
     linked = link_recommendations(store, rec)
-    return {"linked_recommendations": linked, **shadow_evaluate(store, rec, since=since, batch=batch)}
+    return {"linked_recommendations": linked, "reset_only_rows_fixed": fixed, **shadow_evaluate(store, rec, since=since, batch=batch)}
 
 
 def report(store, *, since: datetime | None = None) -> dict[str, Any]:

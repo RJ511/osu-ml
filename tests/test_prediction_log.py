@@ -60,8 +60,8 @@ def test_shadow_evaluation_compares_what_the_model_would_have_said_before_the_ne
         rows = {r["beatmap_id"]: r for r in c.execute(select(m.prediction_log)).mappings().all()}
     a, b = rows[1040], rows[1045]
     assert a["kind"] == "sombra" and a["asof"] == t0 + timedelta(days=5) and 0 < a["p_pass"] < 1 and a["acc_pass"] > 0.8  # previsão do stub
-    assert a["n_attempts"] == 2 and a["passed"] and a["first_try_passed"] is False and a["best_acc"] == pytest.approx(0.94) and a["n_restarts"] == 1
-    assert b["passed"] is False and b["best_acc"] is None and b["challenge"] is not None
+    assert a["n_attempts"] == 2 and a["passed"] and a["first_try_passed"] is True and a["best_acc"] == pytest.approx(0.94) and a["n_restarts"] == 1
+    assert b["passed"] is None and b["best_acc"] is None and b["challenge"] is not None  # só um reinício: sem veredicto (não é "incapaz")
     assert evaluate_pending(store, rec)["pairs"] == 0  # já avaliado: não duplica
 
 
@@ -80,3 +80,30 @@ def test_a_recommended_map_played_later_gets_its_outcome_and_the_report_compares
     assert rep["n_rows"] >= 1 and rep["recommended"]["n"] == 1 and rep["recommended"]["passed"] == 1.0
     # log_recommendations aceita listas vazias e devolve 0
     assert log_recommendations(store, 7, [], ["speed"], "x") == 0
+
+
+def test_outcome_ignores_resets_for_first_try_and_leaves_reset_only_pairs_without_a_verdict():
+    end = datetime(2026, 9, 24, 12, 0)
+    reset = (False, 0.9, {"great": 20, "miss": 1}, "", None, end)  # 1 miss: reinício certo
+    reset_then_pass = outcome([reset, (True, 0.95, {}, "", None, end + timedelta(minutes=2))], hp=5.0)
+    assert reset_then_pass["passed"] is True and reset_then_pass["first_try_passed"] is True and reset_then_pass["n_restarts"] == 1  # reiniciar não conta como falhar à 1.ª
+    only_resets = outcome([reset, (False, 0.85, {"great": 30, "miss": 2}, "", None, end + timedelta(minutes=1))], hp=5.0)
+    assert only_resets["passed"] is None and only_resets["first_try_passed"] is None and only_resets["n_restarts"] == 2  # sem informação: não é "incapaz"
+    died = outcome([reset, (False, 0.8, {"great": 100, "miss": 12}, "", None, end + timedelta(minutes=1))], hp=5.0)
+    assert died["passed"] is False and died["first_try_passed"] is False and died["n_deaths_possible"] == 1  # morrer conta
+
+
+def test_fix_reset_only_rows_clears_the_verdict_of_old_pairs_where_only_resets_happened(tmp_path):
+    from osuml.recommend.log import fix_reset_only_rows
+
+    store, rid, rec, t0 = _world(tmp_path)
+    base = dict(user_id=7, kind="sombra", created_at=t0, evaluated_at=t0)
+    with store.engine.begin() as c:
+        c.execute(m.prediction_log.insert(), [
+            {**base, "beatmap_id": 1, "n_attempts": 3, "n_lazer_attempts": 3, "passed": False, "first_try_passed": False, "n_deaths_possible": 0, "n_restarts": 3},   # só reinícios
+            {**base, "beatmap_id": 2, "n_attempts": 3, "n_lazer_attempts": 3, "passed": False, "first_try_passed": False, "n_deaths_possible": 1, "n_restarts": 2},   # morreu: fica
+            {**base, "beatmap_id": 3, "n_attempts": 2, "n_lazer_attempts": 2, "passed": True, "first_try_passed": False, "n_deaths_possible": 0, "n_restarts": 1}])    # passou: fica
+    assert fix_reset_only_rows(store) == 1 and fix_reset_only_rows(store) == 0  # idempotente
+    with store.engine.connect() as c:
+        rows = {r["beatmap_id"]: r for r in c.execute(select(m.prediction_log)).mappings().all()}
+    assert rows[1]["passed"] is None and rows[2]["passed"] is False and rows[3]["passed"] is True

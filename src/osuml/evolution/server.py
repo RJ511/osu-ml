@@ -171,23 +171,26 @@ function tabPerfil(app,s){
  app.appendChild(n)}
 function tabFalhas(app,s){
  const F=s.fails;if(!F||!F.ok){app.appendChild($("div","card span2 sub",(F&&F.reason)||"Falhas indisponíveis."));return}
- const S=F.summary,k=S.kinds,pc0=v=>v==null?"—":Math.round(v*100)+" %";
- const e=$("div","card span2");e.appendChild($("h2","","Morte ou reinício?"));
- e.appendChild($("div","sub",`${S.n} falhas analisadas (só jogadas do lazer, só mapas com ficheiro). A osu!API não diz se saíste tu ou se a vida acabou, por isso usa-se o modelo de vida do osu!: se os teus erros até ao ponto onde paraste não chegavam para a vida acabar, nem no pior caso, foi um **reinício** (saíste tu). Se chegavam, pode ter sido **morte** (e "provável" quando os erros custaram bem mais do que a vida).`.replace(/\*\*/g,"")));
- const tb=document.createElement("table"),h=document.createElement("tr");["","Reinícios","Mortes"].forEach(t=>h.appendChild($("th","",t)));tb.appendChild(h);
- const row=(l,f)=>{const t=document.createElement("tr");t.append($("td","",l),$("td","mono",f(k.reinicio)),$("td","mono",f(k.morte)));tb.appendChild(t)};
- row("Quantas",x=>String(x.n));row("Em que ponto do mapa (mediana)",x=>pc0(x.progress_median));row("Accuracy quando paraste",x=>x.accuracy_median==null?"—":(x.accuracy_median*100).toFixed(1).replace(".",",")+" %");
- row("Misses (mediana)",x=>x.miss_median==null?"—":String(x.miss_median));row("Quão intensa era a janela (percentil)",x=>pc0(x.pct_intensity_median));
- row("Dificuldade no ponto (percentil, mirror)",x=>x.n_with_strain?pc0(x.strain_pct_median)+` (${x.n_with_strain})`:"ainda sem curvas");
- e.appendChild(tb);
- e.appendChild($("div","note",`Leitura: ${pc0(k.reinicio.n/Math.max(S.n,1))} das falhas são reinícios, e acontecem cedo (${pc0(k.reinicio.progress_median)} do mapa) em trechos fáceis: é escolha tua (reiniciar logo que corre mal). As mortes (${pc0(k.morte.n/Math.max(S.n,1))}) aparecem mais tarde, com mais misses e em trechos mais intensos. "Percentil da dificuldade" vem da curva de strains do mirror e só existe para os mapas já pedidos (vão sendo pedidos em fundo).`));
+ const S=F.summary,k=S.kinds,H=S.reset_habit,pc0=v=>v==null?"—":Math.round(v*100)+" %";
+ const e=$("div","card span2");e.appendChild($("h2","","Mortes e reinícios"));
+ e.appendChild($("div","sub",`${S.n} falhas analisadas (só jogadas do lazer, só mapas com ficheiro). A osu!API não diz se saíste tu ou se a vida acabou, por isso usa-se o modelo de vida do osu!: se os erros até ao ponto onde paraste não chegavam para a vida acabar, nem no pior caso, foi um reinício (saíste tu); se chegavam, pode ter sido morte.`));
+ e.appendChild($("div","banner","Reiniciar não mede habilidade nem dificuldade: quem quer accuracy alta reinicia ao primeiro erro, e muitos reinícios seguidos podem ser só bloqueio mental. Por isso os reinícios não entram no teste semanal, no nível, nas previsões nem na calibração. Só as mortes são sinal de limite."));
  app.appendChild(e);
- const m=$("div","card span2");m.appendChild($("h2","","Mapas onde mais falhas"));
- S.maps.forEach(mp=>{const r=$("div","map"),a=$("a","t",mp.label);a.href="https://osu.ppy.sh/beatmaps/"+mp.beatmap_id;a.target="_blank";a.rel="noopener";r.appendChild(a);
-  const c=$("div","chips");c.appendChild(chip(`${mp.fails} falhas`));c.appendChild(chip(`${mp.deaths} mortes`,mp.deaths?"fail":""));c.appendChild(chip(`${mp.resets} reinícios`));if(mp.death_at!=null)c.appendChild(chip(`morres aos ~${Math.round(mp.death_at*100)} %`));r.appendChild(c);
+ const d=$("div","card span2"),dr=$("div","row");dr.append($("h2","","Mortes (a vida acabou)"),$("span","tag",String(k.morte.n)));d.appendChild(dr);
+ const tb=document.createElement("table");
+ [["Em que ponto do mapa (mediana)",pc0(k.morte.progress_median)],["Misses até morrer (mediana)",k.morte.miss_median==null?"—":String(k.morte.miss_median)],["Intensidade da janela (percentil)",pc0(k.morte.pct_intensity_median)],
+  ["Dificuldade no ponto (percentil, mirror)",k.morte.n_with_strain?pc0(k.morte.strain_pct_median)+` (${k.morte.n_with_strain} falhas com curva)`:"ainda sem curvas"]].forEach(([l,v])=>{const t=document.createElement("tr");t.append($("td","",l),$("td","mono",v));tb.appendChild(t)});
+ d.appendChild(tb);
+ d.appendChild($("div","note","Mapas onde mais morres (a barra é o mapa de ponta a ponta; ● = morte possível, ○ = reinício neste mapa)."));
+ S.maps.filter(mp=>mp.deaths>0).slice(0,6).forEach(mp=>{const r=$("div","map"),a=$("a","t",mp.label);a.href="https://osu.ppy.sh/beatmaps/"+mp.beatmap_id;a.target="_blank";a.rel="noopener";r.appendChild(a);
+  const c=$("div","chips");c.appendChild(chip(`${mp.deaths} mortes`,"fail"));if(mp.death_at!=null)c.appendChild(chip(`morres aos ~${Math.round(mp.death_at*100)} %`));r.appendChild(c);
   const bar=$("div","tk");bar.style.cssText="position:relative;height:14px;margin-top:8px;border-radius:99px;background:var(--surface2)";
-  mp.points.forEach(f=>{const d=$("i");d.style.cssText=`position:absolute;top:2px;width:10px;height:10px;border-radius:50%;left:calc(${Math.min(Math.max(f.t,0),1)*100}% - 5px);`+(f.k==="morte"?"background:var(--bad)":"border:2px solid var(--warn)");bar.appendChild(d)});r.appendChild(bar);m.appendChild(r)});
- m.appendChild($("div","note","● vermelho = morte possível; ○ laranja = reinício. A barra é o mapa de ponta a ponta."));app.appendChild(m)}
+  mp.points.forEach(f=>{const q=$("i");q.style.cssText=`position:absolute;top:2px;width:10px;height:10px;border-radius:50%;left:calc(${Math.min(Math.max(f.t,0),1)*100}% - 5px);`+(f.k==="morte"?"background:var(--bad)":"border:2px solid var(--warn)");bar.appendChild(q)});r.appendChild(bar);d.appendChild(r)});
+ app.appendChild(d);
+ const h=$("div","card span2"),hr=$("div","row");hr.append($("h2","","Hábito de reinício (não é habilidade)"),$("span","tag",String(H.n)));h.appendChild(hr);
+ h.appendChild($("div","sub",`${H.n} reinícios em ${H.maps} mapas; em média aos ${pc0(H.progress_median)} do mapa e ${pc0(H.share_low_miss)} deles com 2 misses ou menos: costuma ser reiniciar cedo por um erro pequeno.`));
+ if(H.top_maps.length){h.appendChild($("div","note","Onde mais reinicias (diz mais sobre o hábito do que sobre o mapa):"));H.top_maps.forEach(t=>h.appendChild($("div","sub",`${t.resets}× · ${t.label}`)))}
+ app.appendChild(h)}
 function tabRival(app,s){
  const rv=s.rival,rc=$("div","card span2");rc.appendChild($("h2","","Rival"));
  if(!rv){rc.appendChild($("div","sub","Ainda sem rival: faltam níveis fiáveis nos 4 eixos."));app.appendChild(rc);return}
@@ -239,7 +242,7 @@ function planRow(m,test,kind){
   if(n.acc_1==null)c.appendChild(chip("sem ganho de pp"));
   else c.appendChild(chip(`+1 pp ≥ ${pc(n.acc_1)}`+(n.acc_5!=null?` · +5 pp ≥ ${pc(n.acc_5)}`:"")))}
  if(m.curve)c.appendChild(chip(`pico aos ${m.curve.peak_pct} %`));
- if(m.fails)c.appendChild(chip(`falhaste ${m.fails.n}× (${m.fails.deaths} mortes)`,m.fails.deaths?"fail":""));
+ if(m.fails&&m.fails.deaths)c.appendChild(chip(`morreste ${m.fails.deaths}× aqui`,"fail"));
  if(m.style)c.appendChild(chip(m.style.label+(m.style.role==="neutro"?"":" · "+m.style.role),m.style.role==="neutro"?"":m.style.role));
  const st=m.status;
  if(st&&st.played){if(test)c.appendChild(chip(`1.ª jogada: ${pc(st.first_acc)} ${st.first_passed?"✓":"✗"}`,st.first_passed?"pass":"fail"));

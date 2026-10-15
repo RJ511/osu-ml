@@ -5,7 +5,11 @@ Reaproveita `analysis/fail_points.py` (modelo de HP do osu!lazer) e junta a curv
 - **Morte** (`pode_ser_morte` / `morte_provavel`): o dano chegava para a vida acabar. Sem a ordem exata dos erros só se pode limitar (pior caso), por isso "pode ser morte" é
   o limite inferior e "provável" quando o dano foi ≥ 1,5× a vida mínima.
 - **Onde**: `progress` = objetos julgados / total → instante da falha → fração do mapa; com os strains, em que percentil da dificuldade do mapa (e que fração do pico) estavas.
-Só falhas do lazer (o stable não envia falhas), só mapas com `.osu` guardado."""
+Só falhas do lazer (o stable não envia falhas), só mapas com `.osu` guardado.
+
+**Reiniciar não mede habilidade nem dificuldade** (decisão do utilizador, 2026-10-15): quem quer accuracy alta reinicia ao primeiro erro parvo, e muitos reinícios seguidos podem ser
+bloqueio mental. Por isso os reinícios são só descritos (hábito) e **não entram** no teste semanal (a "1.ª jogada" é a 1.ª a sério), no nível, nas previsões nem na calibração;
+só as mortes (a vida acabou) são sinal de limite."""
 
 from __future__ import annotations
 
@@ -111,4 +115,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         maps.append({"beatmap_id": bid, "fails": len(rs), "deaths": len(deaths), "resets": len(rs) - len(deaths),
                      "death_at": med([r["t_frac"] for r in deaths]), "points": [{"t": r["t_frac"], "k": r["kind"]} for r in rs]})
     out["maps"] = sorted(maps, key=lambda x: (-x["deaths"], -x["fails"]))
+    # hábito de reinício: NÃO é habilidade nem dificuldade (reiniciar pode ser perfeccionismo, bloqueio ou querer accuracy alta); só se descreve
+    rs = [r for r in rows if r["kind"] == "reinicio"]
+    out["reset_habit"] = {"n": len(rs), "maps": len({r["beatmap_id"] for r in rs}), "progress_median": med([r["progress"] for r in rs]),
+                          "share_low_miss": round(sum(1 for r in rs if r["miss"] <= 2) / len(rs), 3) if rs else None,
+                          "top_maps": [{"beatmap_id": x["beatmap_id"], "resets": x["resets"]} for x in sorted(maps, key=lambda x: -x["resets"])[:5] if x["resets"] >= 2]}
     return out
+
+
+def reset_score_ids(rows: list[dict[str, Any]]) -> set[int]:
+    """Ids dos scores classificados como reinício (para os testes/estatísticas os ignorarem)."""
+    return {int(r["score_id"]) for r in rows if r["kind"] == "reinicio"}

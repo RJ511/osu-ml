@@ -148,3 +148,14 @@ def test_strain_position_and_fail_summary_separate_resets_from_deaths():
     assert s["kinds"]["morte"]["n"] == 2 and s["kinds"]["reinicio"]["n"] == 2 and s["kinds"]["morte"]["miss_median"] == 7.0
     assert s["kinds"]["morte"]["strain_pct_median"] == 0.9 and s["kinds"]["morte"]["n_with_strain"] == 1 and s["kinds"]["reinicio"]["strain_pct_median"] is None
     assert s["maps"][0]["beatmap_id"] == 1 and s["maps"][0]["deaths"] == 2 and s["maps"][0]["resets"] == 1 and s["maps"][0]["death_at"] == 0.55
+
+
+def test_fail_summary_describes_reset_habit_separately_and_exposes_reset_ids():
+    from osuml.evolution import fails as FL
+
+    rows = [{"score_id": 1, "beatmap_id": 7, "kind": "reinicio", "progress": 0.05, "t_frac": 0.05, "accuracy": 0.9, "miss": 1, "pct_intensity": 0.1, "strain": None},
+            {"score_id": 2, "beatmap_id": 7, "kind": "reinicio", "progress": 0.1, "t_frac": 0.1, "accuracy": 0.9, "miss": 3, "pct_intensity": 0.1, "strain": None},
+            {"score_id": 3, "beatmap_id": 7, "kind": "morte", "progress": 0.5, "t_frac": 0.5, "accuracy": 0.9, "miss": 8, "pct_intensity": 0.8, "strain": None}]
+    s = FL.summarize(rows)
+    assert s["reset_habit"]["n"] == 2 and s["reset_habit"]["share_low_miss"] == 0.5 and s["reset_habit"]["top_maps"] == [{"beatmap_id": 7, "resets": 2}]
+    assert FL.reset_score_ids(rows) == {1, 2}

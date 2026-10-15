@@ -256,3 +256,23 @@ def test_band_rises_after_three_consecutive_weeks_above_the_threshold_and_not_ot
     p4 = wk.WeeklyPlanner(FakeRec(), tmp4)
     pl = _write_week(tmp4, 7, weeks[0], 0.95, band=(5.5, 6.2)) + _write_week(tmp4, 7, weeks[1], 0.95) + _write_week(tmp4, 7, weeks[2], 0.95)
     assert p4.maybe_raise_band(7, pl, TODAY, [5.8, 6.5])[1] is None  # a faixa mudou a meio: recomeça a contagem
+
+
+def test_resets_do_not_count_as_the_first_play_in_the_weekly_test_or_the_series():
+    def rp(bid, days_ago, acc, passed, reset=False):
+        p = play(bid, days_ago, acc, passed=passed, stars=6.0)
+        p["reset"] = reset
+        return p
+
+    plan = {"week": "2026-W42", "week_start": "2026-10-12", "test": {"band": [5.8, 6.5], "maps": [{"beatmap_id": 1}, {"beatmap_id": 2}, {"beatmap_id": 3}]}, "sessions": []}
+    plays = [rp(1, 2, 0.60, False, reset=True), rp(1, 1, 0.93, True),                  # reiniciou à 1.ª e passou à 2.ª: a 1.ª a sério foi o passe
+             rp(2, 2, 0.70, False, reset=True), rp(2, 1, 0.50, False, reset=True),      # só reinícios: o mapa ainda não está feito
+             rp(3, 1, 0.80, False)]                                                      # morreu à 1.ª (não é reinício): conta como falha
+    out = wk.evaluate(plan, plays)["test"]
+    m1, m2, m3 = out["maps"]
+    assert m1["status"]["first_passed"] is True and m1["status"]["first_acc"] == 0.93 and m1["status"]["resets"] == 1 and m1["status"]["attempts"] == 2
+    assert m2["status"] == {"played": False, "resets": 2}
+    assert m3["status"]["first_passed"] is False
+    assert out["summary"] == {"done": 2, "total": 3, "first_pass": 1, "first_acc_median": 0.93}
+    first = wk.first_plays(plays)
+    assert first[1]["accuracy"] == 0.93 and 2 not in first and first[3]["accuracy"] == 0.8
